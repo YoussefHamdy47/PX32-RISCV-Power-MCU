@@ -236,8 +236,9 @@ The project is in Phase 1, the base core. Implemented and verified so far:
 | `px_alu` | Done | 24,118 checks against a SystemVerilog reference model, 238 of 238 functional coverage bins hit, 10,000 vectors from an independent Python model, 6 of 6 injected faults detected; synthesises to 1,290 generic cells with no latches; clean Verilator lint |
 | `px_regfile` | Done | 20,766 checks including write-through, collisions, bank switching and asynchronous reset, 329 of 329 coverage bins hit, 7 of 7 injected faults detected; synthesises to exactly 1,984 flip-flops with no latches; clean Verilator lint |
 | `px_decoder` | Done | RV32I, M, Zicsr and Zifencei in machine mode. 109,939 checks, including 54,957 vectors from a table-driven golden model that is itself cross-checked against the GNU disassembler with no unexplained differences; 89 of 89 coverage bins hit; 13 of 13 injected faults detected; 296 generic cells, no latches; clean Verilator lint |
-| Compressed instruction expander | Next | |
-| Pipeline, CSRs and traps, multiply and divide | Planned | |
+| `px_decompressor` | Done | Expands RV32C to 32-bit instructions. Checked exhaustively over all 49,152 compressed encodings (104,328 checks) against a golden model that agrees with the GNU disassembler on every encoding, with the real decoder attached; 14 of 14 injected faults detected; 382 generic cells, no latches; clean Verilator lint |
+| Pipeline (fetch, decode, execute, memory and write-back with forwarding and hazards) | Next | |
+| CSRs and traps, multiply and divide, compliance tests | Planned | |
 
 Generic gate counts come from technology-independent synthesis. They are useful for tracking size, but they are not timing results. Timing at 200 MHz can only be established with a target library or FPGA and static timing analysis.
 
