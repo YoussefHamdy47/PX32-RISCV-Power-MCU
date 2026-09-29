@@ -1,0 +1,4 @@
+# Synthesis targets for scripts/synth.sh: <top_module> <source files...> (paths from repo root)
+# Add each RTL block here once its unit tests pass.
+px_alu rtl/pkg/px_pkg.sv rtl/core/px_alu.sv
+px_regfile rtl/core/px_regfile.sv

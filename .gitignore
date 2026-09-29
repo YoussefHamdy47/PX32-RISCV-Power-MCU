@@ -1,0 +1,14 @@
+# Build and simulation outputs
+sim/
+*.vcd
+*.vvp
+
+# Design documents stay local: only README.md is published
+*.md
+!README.md
+
+# Local tooling and experiments
+.idea/
+.vscode/
+showcase/
+node_modules/
