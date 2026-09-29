@@ -132,6 +132,8 @@ Instructions retire in order, one per cycle at most. Multi-cycle results carry a
 | Floating-point divide and square root | 14, fixed |
 | Integer divide and remainder | 17, fixed |
 
+A taken branch or jump to a 32-bit instruction that starts at a halfword offset costs one more cycle, because its second half is in the next fetch word. Control code aligns branch targets to 4 bytes to avoid it. The integer timings in the table above are measured cycle-exact in simulation; the floating-point and divide timings are targets for later phases.
+
 Long operations (integer divide, floating-point divide and square root) are abandoned when a control interrupt arrives and restarted after it returns. Interrupt latency therefore does not grow by the length of whatever instruction happened to be executing.
 
 ### Register file and fast interrupt context
@@ -237,8 +239,9 @@ The project is in Phase 1, the base core. Implemented and verified so far:
 | `px_regfile` | Done | 20,766 checks including write-through, collisions, bank switching and asynchronous reset, 329 of 329 coverage bins hit, 7 of 7 injected faults detected; synthesises to exactly 1,984 flip-flops with no latches; clean Verilator lint |
 | `px_decoder` | Done | RV32I, M, Zicsr and Zifencei in machine mode. 109,939 checks, including 54,957 vectors from a table-driven golden model that is itself cross-checked against the GNU disassembler with no unexplained differences; 89 of 89 coverage bins hit; 13 of 13 injected faults detected; 296 generic cells, no latches; clean Verilator lint |
 | `px_decompressor` | Done | Expands RV32C to 32-bit instructions. Checked exhaustively over all 49,152 compressed encodings (104,328 checks) against a golden model that agrees with the GNU disassembler on every encoding, with the real decoder attached; 14 of 14 injected faults detected; 382 generic cells, no latches; clean Verilator lint |
-| Pipeline (fetch, decode, execute, memory and write-back with forwarding and hazards) | Next | |
-| CSRs and traps, multiply and divide, compliance tests | Planned | |
+| `px_core`, `px_if_stage` | Done | The integrated 4-stage pipeline runs real programs. Eight self-checking assembly programs cover ALU edge values, every forwarding and load-use path, all load/store widths, every branch condition, every compressed instruction, eleven exception cases with precision checks and self-modifying code. Each runs with ideal memories and twice with random bus stalls (24 runs), under protocol, X and deadlock checks. Sixteen cycle-exact timing checks match the timing table; 16 of 16 injected faults detected; 9,230 generic cells, no latches; clean Verilator lint |
+| CSRs and trap entry | Next | CSR instructions, MRET, multiply and divide currently raise an illegal-instruction trap until their steps are complete |
+| Multiply and divide, compliance tests, reference-simulator trace comparison | Planned | |
 
 Generic gate counts come from technology-independent synthesis. They are useful for tracking size, but they are not timing results. Timing at 200 MHz can only be established with a target library or FPGA and static timing analysis.
 
@@ -299,6 +302,12 @@ bash scripts/synth.sh
 ```
 
 On Windows, `scripts\regress.ps1` and `scripts\run_unit.ps1` wrap the same scripts for PowerShell. Logs go to `sim/logs/`, synthesis reports to `sim/synth/`, and regression also writes an HTML status page to `sim/dashboard/index.html`.
+
+Core test programs live in `sw/tests/core/`. They are assembled with the RISC-V toolchain into memory images under `tb/core/programs/`. Those images are committed, so running the tests does not require the toolchain. To rebuild them after changing a program:
+
+```bash
+bash scripts/build_core_tests.sh
+```
 
 To regenerate the ALU golden vectors after changing the Python model:
 

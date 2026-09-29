@@ -261,7 +261,7 @@ def objdump_all(ws):
         src, obj = Path(tmp) / "w.s", Path(tmp) / "w.o"
         # .insn rather than .word: the assembler marks .word as data, and objdump would
         # print it back as data instead of disassembling it.
-        src.write_text(".text\n" + "".join(f".insn 4, 0x{w:08x}\n" for w in ws))
+        src.write_text(".text\n" + "".join(f".insn 4, 0x{w:08x}\n" for w in ws), newline="\n")
         subprocess.run([asm, "-march=rv32im_zicsr_zifencei", "-mabi=ilp32", "-o", str(obj), str(src)], check=True)
         text = subprocess.run([objdump, "-d", "-M", "no-aliases,numeric", str(obj)],
                               check=True, capture_output=True, text=True).stdout
@@ -411,8 +411,8 @@ def main():
         counts[m] = counts.get(m, 0) + 1
         lines.append(f"{MNEMONICS.index(m):02x}{w:08x}{pack(d):026x}")
     OUT.parent.mkdir(parents=True, exist_ok=True)
-    OUT.write_text("\n".join(lines) + "\n")
-    NAMES.write_text("".join(f"{i} {n}\n" for i, n in enumerate(MNEMONICS)))
+    OUT.write_text("\n".join(lines) + "\n", newline="\n")
+    NAMES.write_text("".join(f"{i} {n}\n" for i, n in enumerate(MNEMONICS)), newline="\n")
     print(f"wrote {len(ws)} vectors ({len(MNEMONICS)} mnemonic ids) to {OUT.relative_to(ROOT)}")
     rare = [m for m in MNEMONICS if counts.get(m, 0) < 5 and ISA.get(m, (0,))[0] != EXACT]
     if rare:

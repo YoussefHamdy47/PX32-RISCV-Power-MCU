@@ -258,7 +258,7 @@ def disassemble(lines, march):
     asm, objdump = find_tool("riscv-none-elf-as"), find_tool("riscv-none-elf-objdump")
     with tempfile.TemporaryDirectory() as tmp:
         src, obj = Path(tmp) / "c.s", Path(tmp) / "c.o"
-        src.write_text(".text\n" + "".join(lines))
+        src.write_text(".text\n" + "".join(lines), newline="\n")
         subprocess.run([asm, f"-march={march}", "-mabi=ilp32", "-o", str(obj), str(src)], check=True)
         text = subprocess.run([objdump, "-d", "-M", "no-aliases,numeric", str(obj)],
                               check=True, capture_output=True, text=True).stdout
@@ -338,8 +338,8 @@ def main():
         ident, out, comp, ill = model(w)
         counts[ident] = counts.get(ident, 0) + 1
         lines.append(f"{IDS.index(ident):02x}{w:08x}{out:08x}{(comp << 1) | ill:02x}")
-    OUT.write_text("\n".join(lines) + "\n")
-    IDS_OUT.write_text("".join(f"{i} {n} {counts.get(n, 0)}\n" for i, n in enumerate(IDS)))
+    OUT.write_text("\n".join(lines) + "\n", newline="\n")
+    IDS_OUT.write_text("".join(f"{i} {n} {counts.get(n, 0)}\n" for i, n in enumerate(IDS)), newline="\n")
     print(f"wrote {len(windows)} vectors ({len(cwords)} compressed, exhaustive) to {OUT.relative_to(ROOT)}")
     missing = [n for n in IDS if not counts.get(n)]
     if missing:

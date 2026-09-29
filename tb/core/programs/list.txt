@@ -1,0 +1,8 @@
+t01_alu
+t02_forwarding
+t03_loadstore
+t04_branch_jump
+t05_compressed
+t06_traps
+t07_fence
+t08_timing
