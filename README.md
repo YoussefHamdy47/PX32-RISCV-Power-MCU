@@ -1,6 +1,6 @@
-# PX32
+# PX32 RISC-V Power MCU
 
-PX32 is a 32-bit RISC-V microcontroller designed specifically for the digital control of power electronics: DC-DC converters, power factor correction stages, inverters and motor drives. It pairs a small, fully deterministic in-order core with the peripherals that a switching converter actually needs: high-resolution PWM, ADCs that are triggered by the PWM, fast analog comparators, and a hardware protection path that does not depend on software.
+PX32 is a 32-bit RISC-V microcontroller (MCU: a CPU with its memory and peripherals on one chip) designed specifically for the digital control of power electronics: DC-DC converters, power factor correction stages, inverters and motor drives. It pairs a small, fully deterministic in-order core with the peripherals that a switching converter actually needs: high-resolution PWM, ADCs that are triggered by the PWM, fast analog comparators, and a hardware protection path that does not depend on software.
 
 The first target application is an isolated 48 V to 12 V, 500 W converter built with GaN transistors. That design drives the requirements for the chip and serves as the reference for closed-loop verification.
 
@@ -235,8 +235,9 @@ The project is in Phase 1, the base core. Implemented and verified so far:
 | Build and regression infrastructure | Done | Self-checking runner that requires a clean simulator exit, a PASS line, no error diagnostics and a timeout |
 | `px_alu` | Done | 24,118 checks against a SystemVerilog reference model, 238 of 238 functional coverage bins hit, 10,000 vectors from an independent Python model, 6 of 6 injected faults detected; synthesises to 1,290 generic cells with no latches; clean Verilator lint |
 | `px_regfile` | Done | 20,766 checks including write-through, collisions, bank switching and asynchronous reset, 329 of 329 coverage bins hit, 7 of 7 injected faults detected; synthesises to exactly 1,984 flip-flops with no latches; clean Verilator lint |
-| Instruction decoder | Next | |
-| Compressed decoder, pipeline, CSRs and traps, multiply and divide | Planned | |
+| `px_decoder` | Done | RV32I, M, Zicsr and Zifencei in machine mode. 109,939 checks, including 54,957 vectors from a table-driven golden model that is itself cross-checked against the GNU disassembler with no unexplained differences; 89 of 89 coverage bins hit; 13 of 13 injected faults detected; 296 generic cells, no latches; clean Verilator lint |
+| Compressed instruction expander | Next | |
+| Pipeline, CSRs and traps, multiply and divide | Planned | |
 
 Generic gate counts come from technology-independent synthesis. They are useful for tracking size, but they are not timing results. Timing at 200 MHz can only be established with a target library or FPGA and static timing analysis.
 

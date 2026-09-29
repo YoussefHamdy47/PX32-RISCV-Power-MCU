@@ -2,3 +2,4 @@
 # Add each RTL block here once its unit tests pass.
 px_alu rtl/pkg/px_pkg.sv rtl/core/px_alu.sv
 px_regfile rtl/core/px_regfile.sv
+px_decoder rtl/pkg/px_pkg.sv rtl/core/px_decoder.sv
