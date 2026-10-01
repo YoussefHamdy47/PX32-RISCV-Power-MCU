@@ -108,6 +108,35 @@
       "value": "0x1000"
     },
     "regions": [
+      // Reference-model-only IO region for the Sail CLINT and interrupt generator. PX32 maps
+      // nothing here (bus error); no selected test accesses it.
+      {
+        "base": { "len": 64, "value": "0x02000000" },
+        "size": { "len": 64, "value": "0x0e000000" },
+        "attributes": {
+          "mem_type": "IOMemory",
+          "cacheable": false,
+          "coherent": true,
+          "executable": false,
+          "readable": true,
+          "writable": true,
+          "read_idempotent": false,
+          "write_idempotent": false,
+          "misaligned_exceptions": {
+            "load_store": { "Some": "AlignmentException" },
+            "vector": { "Some": "AlignmentException" },
+            "amo": "AlignmentException"
+          },
+          "atomic_support": "AMONone",
+          "misaligned_atomicity_granule_size_exp": 0,
+          "vector_misaligned_atomicity_granule_size_exp": 0,
+          "reservability": "RsrvNone",
+          "supports_cbo_zero": false,
+          "supports_pte_read": false,
+          "supports_pte_write": false
+        },
+        "include_in_device_tree": false
+      },
       // PX32 compliance memory: 1 MB read/write/execute at 0x1000_0000 (tb_compliance)
       {
         "base": { "len": 64, "value": "0x10000000" },
@@ -150,13 +179,13 @@
       "invalidate_on_same_hart_store": false
     },
     "clint": {
-      "supported": false,
+      "supported": true,
       "base": 33554432,
       "size": 786432
     },
     "simple_interrupt_generator": {
-      "supported": false,
-      "base": 0
+      "supported": true,
+      "base": 201326592
     },
     "clock_frequency": 1000000000,
     "instructions_per_tick": 2,

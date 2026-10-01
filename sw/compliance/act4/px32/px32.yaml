@@ -49,7 +49,7 @@ params:
   TRAP_ON_RESERVED_INSTRUCTION: true
   TRAP_ON_UNIMPLEMENTED_CSR: true
 
-  # mtval and trap reporting behavior (all false per TvalEN= False)
+  # mtval and trap reporting behavior: PX32 reports a value for every class it raises (D-022)
   REPORT_ENCODING_IN_MTVAL_ON_ILLEGAL_INSTRUCTION: true
   REPORT_VA_IN_MTVAL_ON_BREAKPOINT: true
   REPORT_VA_IN_MTVAL_ON_LOAD_MISALIGNED: true
@@ -73,41 +73,6 @@ params:
   VENDOR_ID_BANK: 0x0 # mvendorid reads 0
   VENDOR_ID_OFFSET: 0x0
   MCOUNTINHIBIT_IMPLEMENTED: false # mcountinhibit traps (D-022)
-  COUNTINHIBIT_EN:
-    [
-      false,
-      false,
-      false,
-      false,
-      false,
-      false,
-      false,
-      false,
-      false,
-      false,
-      false,
-      false,
-      false,
-      false,
-      false,
-      false,
-      false,
-      false,
-      false,
-      false,
-      false,
-      false,
-      false,
-      false,
-      false,
-      false,
-      false,
-      false,
-      false,
-      false,
-      false,
-      false
-    ]
 
   HPM_COUNTER_EN:
     [

@@ -15,7 +15,7 @@ PX32 facts encoded (D-022, D-023, contract section 1):
   mtval: faulting address for access/misaligned faults, pc for EBREAK, instruction bits for
   illegal instructions; unimplemented CSRs trap; mcause WLRL writes do not trap
   no Zicntr, no Zihpm (hpm counters read-only 0), no mcountinhibit, no U/S mode,
-  zero PMP entries, no interrupt sources before Phase 2 (no CLINT, no interrupt generator)
+  zero PMP entries, no interrupt sources before Phase 2 (the Sail CLINT and interrupt generator exist only in the reference model)
   memory: one RWX region at 0x1000_0000 (1 MB in tb_compliance), halt word at its top
 
 NOT VALIDATED: until the ACT4 framework (make + UDB + Sail) runs, these files have only been
@@ -76,6 +76,9 @@ def udb(tpl):
               "REPORT_VA_IN_MTVAL_ON_INSTRUCTION_ACCESS_FAULT", "REPORT_VA_IN_MTVAL_ON_INSTRUCTION_MISALIGNED",
               "REPORT_VA_IN_MTVAL_ON_LOAD_ACCESS_FAULT", "REPORT_VA_IN_MTVAL_ON_STORE_AMO_ACCESS_FAULT"]:
         t = sub(t, rf"^  {p}: false$", f"  {p}: true", p)
+    t = sub(t, r"^  # mtval and trap reporting behavior .*$",
+            "  # mtval and trap reporting behavior: PX32 reports a value for every class it raises (D-022)",
+            "mtval comment")
     t = sub(t, r"^  MARCHID_IMPLEMENTED: true$", "  MARCHID_IMPLEMENTED: false # marchid reads 0", "marchid")
     t = sub(t, r"^  ARCH_ID_VALUE: .*\n", "", "archid value")
     t = sub(t, r"^  MIMPID_IMPLEMENTED: true$", "  MIMPID_IMPLEMENTED: false # mimpid reads 0 (MIMPID parameter)", "mimpid")
@@ -84,8 +87,10 @@ def udb(tpl):
     t = sub(t, r"^  VENDOR_ID_OFFSET: .*$", "  VENDOR_ID_OFFSET: 0x0", "vendor offset")
     t = sub(t, r"^  MCOUNTINHIBIT_IMPLEMENTED: true$", "  MCOUNTINHIBIT_IMPLEMENTED: false # mcountinhibit traps (D-022)",
             "mcountinhibit")
-    # every entry of the three 32-entry arrays: no inhibit, no hpm counters, no mcounteren
-    for arr in ["COUNTINHIBIT_EN", "HPM_COUNTER_EN", "MCOUNTENABLE_EN"]:
+    # COUNTINHIBIT_EN exists only when mcountinhibit is implemented (UDB validation rejects it)
+    t = sub(t, r"^  COUNTINHIBIT_EN:\n\s*\[[^\]]*\]\n", "", "COUNTINHIBIT_EN removal")
+    # every entry of the remaining 32-entry arrays: no hpm counters, no mcounteren
+    for arr in ["HPM_COUNTER_EN", "MCOUNTENABLE_EN"]:
         m = re.search(rf"^  {arr}:\n\s*\[(.*?)\]", t, re.S | re.M)
         if not m:
             sys.exit(f"template array {arr} not found")
@@ -98,7 +103,15 @@ def sail(tpl):
     t = tpl
     t = edit(t, '"vendorid": 1538,', '"vendorid": 0,')
     t = edit(t, '"archid": 3,', '"archid": 0,')
-    t = sub(t, r'"clint": \{\s*"supported": true', '"clint": {\n      "supported": false', "clint")
+    # Sail platform devices: ACT4 signature generation needs Sail's CLINT and simple interrupt
+    # generator (framework build_plan.py, _sail_platform_defines) even for a DUT without them.
+    # They exist only in the reference model, in an IO region below the PX32 memory (the
+    # CV32E20 layout: CLINT 0x0200_0000, generator 0x0C00_0000).
+    t = sub(t, r'"clint": \{\s*"supported": true,\s*"base": 33554432,',
+            '"clint": {\n      "supported": true,\n      "base": 33554432,', "clint")
+    t = sub(t, r'"simple_interrupt_generator": \{\s*"supported": false,\s*"base": 0\s*\}',
+            '"simple_interrupt_generator": {\n      "supported": true,\n      "base": 201326592\n    }',
+            "interrupt generator")
     for ext, sup in [("Zifencei", "true"), ("Zcb", "false"), ("Zba", "false"), ("Zbb", "false"),
                      ("Zbs", "false"), ("Zbc", "false")]:
         t = sub(t, rf'("{ext}": \{{\s*"supported": )(true|false)', rf"\g<1>{sup}", ext)
@@ -115,11 +128,42 @@ def sail(tpl):
         if n != 1:
             sys.exit(f"xtval_nonzero.{k} matched {n} times")
     t = t[:m.start(1)] + block + t[m.end(1):]
-    # memory: replace the region list with the single PX32 RAM
+    # memory: replace the region list with the PX32 RAM and the reference-model IO region
     m = re.search(r'"regions": \[(.*)\n    \]', t, re.S)
     if not m:
         sys.exit("memory regions not found")
-    region = f'''
+    # Sail requires the regions in ascending address order: IO (0x0200_0000) before RAM
+    io_region = f'''
+      // Reference-model-only IO region for the Sail CLINT and interrupt generator. PX32 maps
+      // nothing here (bus error); no selected test accesses it.
+      {{
+        "base": {{ "len": 64, "value": "0x02000000" }},
+        "size": {{ "len": 64, "value": "0x0e000000" }},
+        "attributes": {{
+          "mem_type": "IOMemory",
+          "cacheable": false,
+          "coherent": true,
+          "executable": false,
+          "readable": true,
+          "writable": true,
+          "read_idempotent": false,
+          "write_idempotent": false,
+          "misaligned_exceptions": {{
+            "load_store": {{ "Some": "AlignmentException" }},
+            "vector": {{ "Some": "AlignmentException" }},
+            "amo": "AlignmentException"
+          }},
+          "atomic_support": "AMONone",
+          "misaligned_atomicity_granule_size_exp": 0,
+          "vector_misaligned_atomicity_granule_size_exp": 0,
+          "reservability": "RsrvNone",
+          "supports_cbo_zero": false,
+          "supports_pte_read": false,
+          "supports_pte_write": false
+        }},
+        "include_in_device_tree": false
+      }}'''
+    ram_region = f'''
       // PX32 compliance memory: 1 MB read/write/execute at 0x1000_0000 (tb_compliance)
       {{
         "base": {{ "len": 64, "value": "0x{RAM_BASE:08x}" }},
@@ -148,6 +192,7 @@ def sail(tpl):
         }},
         "include_in_device_tree": true
       }}'''
+    region = io_region + "," + ram_region
     t = t[:m.start(1)] + region + t[m.end(1):]
     return t
 
@@ -242,8 +287,13 @@ def macros():
   j 1b                       ;                        \\
 3:
 
-# No interrupt sources before Phase 2 (CLIC): interrupt tests are not selected by the
-# configuration; the macros stay empty.
+# Interrupt delays (cycles): required by tests/env/check_defines.h for every test, used only
+# by interrupt tests, which are excluded in Phase 1. Upstream CVA6/CV32E20/CV32E40X values.
+#define RVMODEL_INTERRUPT_LATENCY 10
+#define RVMODEL_TIMER_INT_SOON_DELAY 100
+
+# No interrupt sources before Phase 2 (CLIC): interrupt tests are excluded from the build
+# (setup_act4_wsl.sh); the macros stay empty.
 #define RVMODEL_SET_MEXT_INT(_R1, _R2)
 #define RVMODEL_CLR_MEXT_INT(_R1, _R2)
 #define RVMODEL_SET_MSW_INT(_R1, _R2)
@@ -275,7 +325,7 @@ def main():
          "name: px32\n"
          "compiler_exe: riscv-none-elf-gcc # xPack 15.2.0-1 (Windows build through wsl_wingcc.sh)\n"
          "objdump_exe: riscv-none-elf-objdump\n"
-         "ref_model_exe: sail_riscv_sim # Sail 0.14.1\n"
+         "ref_model_exe: sail_riscv_sim # Sail 0.13.1 (required by the 4.1.0 framework)\n"
          "udb_config: px32.yaml\n"
          "linker_script: link.ld\n"
          "dut_include_dir: .\n").encode())

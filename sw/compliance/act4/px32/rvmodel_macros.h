@@ -39,8 +39,13 @@
   j 1b                       ;                        \
 3:
 
-# No interrupt sources before Phase 2 (CLIC): interrupt tests are not selected by the
-# configuration; the macros stay empty.
+# Interrupt delays (cycles): required by tests/env/check_defines.h for every test, used only
+# by interrupt tests, which are excluded in Phase 1. Upstream CVA6/CV32E20/CV32E40X values.
+#define RVMODEL_INTERRUPT_LATENCY 10
+#define RVMODEL_TIMER_INT_SOON_DELAY 100
+
+# No interrupt sources before Phase 2 (CLIC): interrupt tests are excluded from the build
+# (setup_act4_wsl.sh); the macros stay empty.
 #define RVMODEL_SET_MEXT_INT(_R1, _R2)
 #define RVMODEL_CLR_MEXT_INT(_R1, _R2)
 #define RVMODEL_SET_MSW_INT(_R1, _R2)

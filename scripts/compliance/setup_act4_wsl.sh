@@ -10,7 +10,9 @@
 #   Ruby 3.2 from Ubuntu (the UDB Gemfile requires "~> 3.2"; .mise.toml pins 3.4.10 via mise,
 #     not used); UDB gems as locked by framework/src/act/data/Gemfile.lock. Several locked gems
 #     (nkf, json, bigdecimal, ...) compile native extensions and need the Ruby headers (ruby-dev)
-#   Sail 0.14.1 Linux x86_64 release -> ~/px32-tools/sail
+#   Sail 0.13.1 Linux x86_64 release -> ~/px32-tools/sail: the version the 4.1.0 framework
+#     requires (REQUIRED_SAIL_VERSION in framework/src/act/config.py; README and Dockerfile
+#     at the tag agree). Any other version stops the build
 #   riscv-arch-test 4.1.0 (6e8a45123f14cebfb3df151a0e7b849b4389b33b), cloned locally from the
 #     Windows checkout C:\px32-tools\src\riscv-arch-test (LF line endings)
 #   compiler: the Windows xPack riscv-none-elf-gcc 15.2.0-1 through scripts/compliance/
@@ -26,7 +28,7 @@ set -euo pipefail
 T="$HOME/px32-tools"
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 ARCH_TEST_COMMIT=6e8a45123f14cebfb3df151a0e7b849b4389b33b
-SAIL_VER=0.14.1
+SAIL_VER=0.13.1
 UV_VER=0.11.33
 mkdir -p "$T" && cd "$T"
 
@@ -40,11 +42,12 @@ if [ -n "$missing" ]; then
 fi
 
 # Sail reference model
-if [ ! -x "$T/sail/bin/sail_riscv_sim" ]; then
-  curl -fL -o sail.tgz "https://github.com/riscv/sail-riscv/releases/download/$SAIL_VER/sail-riscv-Linux-x86_64.tar.gz"
-  sha256sum sail.tgz | tee sail.sha256
-  mkdir -p sail && tar -xzf sail.tgz -C sail --strip-components=1
+if [ "$("$T/sail/bin/sail_riscv_sim" --version 2>/dev/null)" != "$SAIL_VER" ]; then
+  curl -fL -o "sail-$SAIL_VER.tgz" "https://github.com/riscv/sail-riscv/releases/download/$SAIL_VER/sail-riscv-Linux-x86_64.tar.gz"
+  sha256sum "sail-$SAIL_VER.tgz" | tee "sail-$SAIL_VER.sha256"
+  rm -rf sail && mkdir -p sail && tar -xzf "sail-$SAIL_VER.tgz" -C sail --strip-components=1
 fi
+test "$("$T/sail/bin/sail_riscv_sim" --version)" = "$SAIL_VER"
 
 # uv
 command -v "$HOME/.local/bin/uv" >/dev/null || curl -LsSf "https://astral.sh/uv/$UV_VER/install.sh" | sh
@@ -73,7 +76,10 @@ uv sync
 rm -rf config/cores/px32 && mkdir -p config/cores/px32
 cp -r "$REPO/sw/compliance/act4/px32" config/cores/px32/px32
 find config/cores/px32 -type f -exec sed -i 's/\r$//' {} +
-make CONFIG_FILES=config/cores/px32/px32/test_config.yaml --jobs "$(nproc)"
+# Exclusions: the suite's defaults (Sdtrig*, debug triggers) plus InterruptsSm, which needs an
+# interrupt source; PX32 has none before the Phase 2 CLIC (mie/mip read 0, D-022). Revisit in 2.2.
+make CONFIG_FILES=config/cores/px32/px32/test_config.yaml \
+     EXCLUDE_EXTENSIONS=SdtrigSm,SdtrigS,SdtrigU,InterruptsSm --jobs "$(nproc)"
 
 # hand the ELFs to Windows
 out=/mnt/c/px32-tools/act4-elfs
