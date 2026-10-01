@@ -116,10 +116,33 @@ r11:
   jal  x0, 2f
   lw   a1, 1(a0)
 2:
+  /* 14. Byte load access fault at a non-word-aligned address: tval is the byte address
+   *     (the bus request is word aligned, the reported address is not) */
+  EXPECT_TRAP(r14)
+t_lacc_b:
+  lb   a1, 3(a4)
+  j    fail_handler
+r14:
+  CHECK_TRAP(7, TF_TVAL, FAULT_ADDR + 3)
+  /* 15. Halfword store access fault at offset 2: tval is the halfword address */
+  EXPECT_TRAP(r15)
+t_sacc_h:
+  sh   a5, 2(a4)
+  j    fail_handler
+r15:
+  CHECK_TRAP(8, TF_TVAL, FAULT_ADDR + 2)
+  /* 16. Misaligned word load from an unmapped address: the misaligned exception ranks
+   *     above the access fault (no bus request is made) */
+  EXPECT_TRAP(r16)
+t_lmis_unmapped:
+  lw   a1, 1(a4)
+  j    fail_handler
+r16:
+  CHECK_TRAP(9, TF_CAUSE, CAUSE_LMISAL)
   PASS
 
   /* Expected traps, in order: cause, pc, tval */
-  TRAPS(11)
+  TRAPS(14)
   TRAP(CAUSE_ECALL_M, t_ecall,   0)
   TRAP(CAUSE_BREAK,   t_ebreak,  t_ebreak)
   TRAP(CAUSE_BREAK,   t_cebreak, t_cebreak)
@@ -131,3 +154,6 @@ r11:
   TRAP(CAUSE_SACCESS, t_sacc,    FAULT_ADDR)
   TRAP(CAUSE_LACCESS, t_lacc2,   FAULT_ADDR)
   TRAP(CAUSE_IACCESS, tbuf,      tbuf)
+  TRAP(CAUSE_LACCESS, t_lacc_b,  FAULT_ADDR + 3)
+  TRAP(CAUSE_SACCESS, t_sacc_h,  FAULT_ADDR + 2)
+  TRAP(CAUSE_LMISAL,  t_lmis_unmapped, FAULT_ADDR + 1)

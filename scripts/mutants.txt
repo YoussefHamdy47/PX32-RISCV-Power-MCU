@@ -595,3 +595,9 @@
 - assign ex_is_div = ex_dec_q.muldiv_en &&  ex_dec_q.muldiv_op[2];
 + assign ex_is_div = ex_dec_q.muldiv_en &&  ex_dec_q.muldiv_op[2] && ex_dec_q.muldiv_op[1];
 # DIV/DIVU not recognized as divides (only REM/REMU run the divider)
+
+[P21] rtl/core/px_core.sv tb_core
+- assign trap_tval_o  = wb_bus_err ? wb_addr_q : ex_tval;
++ assign trap_tval_o  = wb_bus_err ? {wb_addr_q[31:2], 2'b00} : ex_tval;
+# load/store access-fault mtval loses the byte offset (the bus request is word aligned);
+# survived every bench until t06 cases 14-15 (pre-Phase 2 audit)
