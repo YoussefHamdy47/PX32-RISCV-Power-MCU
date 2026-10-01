@@ -9,12 +9,16 @@ scripts/compliance/elf2mem.py into tb/compliance/tb_compliance.sv (px_core RTL, 
 A test passes only if all of these hold:
   - the bench reports PASS: the ELF stored 1 to the PX32 halt word (RVMODEL_HALT_PASS);
     RVMODEL_HALT_FAIL stores 3
-  - the console (RVMODEL_IO_WRITE_STR) shows no "RVCP-SUMMARY: TEST FAILED" line
+  - the console (RVMODEL_IO_WRITE_STR) shows exactly one "RVCP-SUMMARY: TEST PASSED" line
+    and no "RVCP-SUMMARY: TEST FAILED" line (a halt without the summary is not a pass)
   - the simulation ends without bench errors, deadlock, cycle limit or wall-clock limit
 Fail closed:
   - the suite checkout is not at the pinned 4.1.0 commit
   - a required group (tests/rv32i/{I,M,Zca,Zicsr,Zifencei}) has no sources, or any source
     has no ELF in --elf-dir (not built counts as a failure, never as skipped)
+  - --elf-dir has no MANIFEST.txt (written by setup_act4_wsl.sh), or the manifest's suite
+    commit or configuration hashes differ from the pinned commit and the repository's
+    sw/compliance/act4/px32 files: the ELFs were built from another configuration
 Other ELFs found in --elf-dir (groups the configuration selected beyond the required ones)
 are run and reported as informational.
 --stress SEED: every test that passes with ideal memory runs again with random bus stalls
@@ -41,6 +45,31 @@ SUITE_COMMIT = "6e8a45123f14cebfb3df151a0e7b849b4389b33b"      # riscv-arch-test
 REQUIRED = ["I", "M", "Zca", "Zicsr", "Zifencei"]
 HALT, CONSOLE = "100ffff0", "100ffff8"                      # make_act4_config.py
 OUT = ROOT / "sim/compliance/act4"
+CONFIG = ROOT / "sw/compliance/act4/px32"
+
+
+def manifest_problems(elf_dir):
+    """Differences between the ELF set's manifest and the current configuration files."""
+    import hashlib
+    mf = elf_dir / "MANIFEST.txt"
+    if not mf.is_file():
+        return [f"no {mf.name} in {elf_dir}: rebuild with setup_act4_wsl.sh"]
+    got = {}
+    suite = None
+    for ln in mf.read_text().splitlines():
+        f = ln.split()
+        if len(f) == 2 and f[0] == "suite":
+            suite = f[1]
+        elif len(f) == 3 and f[0] == "config":
+            got[f[1]] = f[2]
+    want = {c.name: hashlib.sha256(c.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
+            for c in sorted(CONFIG.iterdir()) if c.is_file()}
+    probs = [] if suite == SUITE_COMMIT else [f"manifest suite {suite}, expected {SUITE_COMMIT}"]
+    for n in sorted(set(want) | set(got)):
+        if want.get(n) != got.get(n):
+            probs.append(f"configuration file {n}: built from {str(got.get(n))[:12]}, "
+                         f"repository has {str(want.get(n))[:12]}")
+    return probs
 
 
 def run_elf(vvp, elf, name, work, stress=None):
@@ -63,9 +92,13 @@ def run_elf(vvp, elf, name, work, stress=None):
     (work / "run.log").write_text(out)
     lines = [ln for ln in out.splitlines() if re.match(r"^(PASS|FAIL|TIMEOUT) tb_compliance ", ln)]
     console_fail = [ln for ln in out.splitlines() if "RVCP-SUMMARY: TEST FAILED" in ln]
+    console_pass = [ln for ln in out.splitlines() if "RVCP-SUMMARY: TEST PASSED" in ln]
     ok = (p.returncode == 0 and len(lines) == 1 and lines[0].startswith(f"PASS tb_compliance {name} ")
-          and not console_fail and not re.search(r"^(ERROR|FATAL|FAIL|TIMEOUT)", out, re.M))
+          and len(console_pass) == 1 and not console_fail
+          and not re.search(r"^(ERROR|FATAL|FAIL|TIMEOUT)", out, re.M))
     detail = (console_fail or lines or out.strip().splitlines()[-1:] or ["no result line"])[0]
+    if lines and lines[0].startswith("PASS") and len(console_pass) != 1 and not console_fail:
+        detail = f"halted with the pass value but printed {len(console_pass)} passing summary lines"
     return ("pass" if ok else "fail"), detail
 
 
@@ -80,7 +113,8 @@ def run_test(vvp, elf, name, work, stress):
 def selftest(vvp):
     fx = ROOT / "sw/compliance/selftest/act4"
     link = ROOT / "sw/compliance/act4/px32/link.ld"
-    expect = {"act_pass": "pass", "act_fail": "fail", "act_console_fail": "fail", "act_nohalt": "fail"}
+    expect = {"act_pass": "pass", "act_fail": "fail", "act_console_fail": "fail", "act_nohalt": "fail",
+              "act_silent_pass": "fail"}
     ok = True
     for t, want in expect.items():
         work = OUT / "selftest" / t
@@ -117,6 +151,9 @@ def main():
         sys.exit(f"FAIL riscv-arch-test at {head}, expected {SUITE_COMMIT}")
     if not a.elf_dir or not a.elf_dir.is_dir():
         sys.exit("FAIL no --elf-dir with built ELFs")
+    stale = manifest_problems(a.elf_dir)
+    if stale:
+        sys.exit("FAIL stale or unidentified ELF set:\n  " + "\n  ".join(stale))
     elfs = {p.stem: p for p in a.elf_dir.rglob("*.elf")}
     results, ok, used = [], True, set()
     for g in REQUIRED:

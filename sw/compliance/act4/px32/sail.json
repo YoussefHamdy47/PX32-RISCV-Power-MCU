@@ -1,5 +1,4 @@
 {
-  // TODO: This config needs to be run against CVA6 (cv32a65x) to confirm most of the settings
   "$schema": "/opt/sail/share/sail-riscv/sail_riscv_config_schema.json",
   "base": {
     "xlen": 32,
@@ -8,8 +7,8 @@
     "writable_fiom": true,
     "writable_hpm_counters": {
       "len": 32,
-      // Only HPM counter 1 and 2 are active
-      "value": "0x0000_0005"
+      // PX32: no writable hpm counter (mhpmcounter3-31 read-only zero, D-022)
+      "value": "0x0000_0000"
     },
     "scounteren_writable_bits": {
       "len": 32,
@@ -79,7 +78,7 @@
       "fs_legal_states": "ExtContext_Off",
       "vs_legal_states": "ExtContext_Off"
     },
-    "privileged_isa_version": "Privileged_ISA_1_12"
+    "privileged_isa_version": "Privileged_ISA_1_13"
   },
   "memory": {
     "physaddr_bits": 32,

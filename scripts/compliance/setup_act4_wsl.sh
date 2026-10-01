@@ -78,11 +78,22 @@ cp -r "$REPO/sw/compliance/act4/px32" config/cores/px32/px32
 find config/cores/px32 -type f -exec sed -i 's/\r$//' {} +
 # Exclusions: the suite's defaults (Sdtrig*, debug triggers) plus InterruptsSm, which needs an
 # interrupt source; PX32 has none before the Phase 2 CLIC (mie/mip read 0, D-022). Revisit in 2.2.
+EXCLUDE=SdtrigSm,SdtrigS,SdtrigU,InterruptsSm
 make CONFIG_FILES=config/cores/px32/px32/test_config.yaml \
-     EXCLUDE_EXTENSIONS=SdtrigSm,SdtrigS,SdtrigU,InterruptsSm --jobs "$(nproc)"
+     EXCLUDE_EXTENSIONS="$EXCLUDE" --jobs "$(nproc)"
 
-# hand the ELFs to Windows
+# hand the ELFs to Windows, with a manifest that ties them to this configuration:
+# run_act4.py refuses an ELF set whose manifest does not match the repository's
+# sw/compliance/act4/px32 files (ELFs built from an older configuration are stale)
 out=/mnt/c/px32-tools/act4-elfs
 rm -rf "$out" && mkdir -p "$out"
 find work -name '*.elf' -path '*elfs*' -exec cp {} "$out/" \;
-echo "ELFs copied to $out: $(ls "$out" | wc -l)"
+{
+  echo "suite $ARCH_TEST_COMMIT"
+  echo "sail $("$T/sail/bin/sail_riscv_sim" --version)"
+  echo "exclude $EXCLUDE"
+  for f in $(cd config/cores/px32/px32 && ls | LC_ALL=C sort); do
+    echo "config $f $(sha256sum < "config/cores/px32/px32/$f" | cut -d' ' -f1)"
+  done
+} > "$out/MANIFEST.txt"
+echo "ELFs copied to $out: $(ls "$out"/*.elf | wc -l)"
