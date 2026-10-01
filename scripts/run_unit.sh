@@ -27,7 +27,10 @@ if ! iverilog -g2012 -Wall -o "sim/${TB}.vvp" -s "$TB" -c "$FLIST" > "$LOG" 2>&1
   exit 1
 fi
 
-if ! timeout "${PX_TEST_TIMEOUT_SECONDS:-60}s" vvp -n "sim/${TB}.vvp" "$@" >> "$LOG" 2>&1; then
+# Wall-clock limit: PX_TEST_TIMEOUT_SECONDS, else a "# timeout_seconds: N" line in the source
+# list (long integration benches declare it explicitly), else 60 s.
+LIMIT="${PX_TEST_TIMEOUT_SECONDS:-$(sed -n 's/^# timeout_seconds: *\([0-9][0-9]*\).*/\1/p' "$FLIST" | head -1)}"
+if ! timeout "${LIMIT:-60}s" vvp -n "sim/${TB}.vvp" "$@" >> "$LOG" 2>&1; then
   cat "$LOG"
   echo "FAIL $TB: simulator failed or exceeded timeout"
   exit 1

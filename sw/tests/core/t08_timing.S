@@ -3,7 +3,11 @@
  * retires exactly DELTA cycles after the start marker. DELTA counts every instruction
  * between the markers plus the end marker itself, plus any penalty:
  *   ALU op 1, load 1 (+1 if the next instruction uses it), taken branch / JALR /
- *   FENCE.I 3, not-taken branch 1, JAL 2, 32-bit branch target at a halfword offset +1. */
+ *   FENCE.I 3, not-taken branch 1, JAL 2, 32-bit branch target at a halfword offset +1.
+ * Blocks 17-24 were added by the pre-1.6 audit: the D-020 penalty for JAL, JALR and
+ * FENCE.I, back-to-back redirects, store-to-load, a loaded store address, and an EX
+ * redirect squashing a JAL in ID. Their BLOCK lines are assembled without RVC so the
+ * code after them is word aligned. */
 #include "px_test.h"
 
 #define BLOCK(id, delta)  MARK_PREP(s0, 0, 0); MARK_PREP(s1, id, delta); MARK_REG(s0)
@@ -11,7 +15,7 @@
 
   .data
   .balign 4
-tv:   .word 5, 6
+tv:   .word 5, 6, tv
 
   .text
   .globl test_main
@@ -140,4 +144,60 @@ test_main:
   .option norvc
   END
   .option pop
+#define NORVC  .option push; .option norvc
+#define RVC    .option pop
+  /* 17. JAL to a 32-bit instruction at a halfword offset: 2 + 1 + end */
+  .balign 4
+  NORVC; BLOCK(17, 4); jal x0, 17f; RVC
+  c.nop
+17:
+  NORVC; END; RVC
+  /* 18. JAL to a 16-bit instruction at a halfword offset: 2 + 1 + end */
+  .balign 4
+  NORVC; BLOCK(18, 4); jal x0, 18f; RVC
+  c.nop
+18:
+  c.addi a0, 1
+  NORVC; END; RVC
+  /* 19. JALR to a 32-bit instruction at a halfword offset: 3 + 1 + end */
+  la   a5, 19f
+  .balign 4
+  NORVC; BLOCK(19, 5); jalr x0, 0(a5); RVC
+  c.nop
+19:
+  NORVC; END; RVC
+  /* 20. FENCE.I at a halfword offset (its 32-bit successor is too): 1 + 3 + 1 + end */
+  .balign 4
+  NORVC; BLOCK(20, 6); RVC
+  c.nop
+  NORVC; fence.i; END; RVC
+  /* 21. taken branch to a taken branch: 3 + 3 + end */
+  .balign 4
+  NORVC
+  BLOCK(21, 7)
+  beq  x0, x0, 21f
+  nop
+21:
+  beq  x0, x0, 22f
+  nop
+22:
+  END
+  /* 22. store, load of the same word, dependent use: 1 + 1 + 1 stall + 1 + end */
+  BLOCK(22, 5)
+  sw   a2, 4(a1)
+  lw   a0, 4(a1)
+  addi a2, a0, 1
+  END
+  /* 23. loaded pointer used as a store address: 1 + 1 stall + 1 + end */
+  BLOCK(23, 4)
+  lw   a0, 8(a1)
+  sw   a2, 0(a0)
+  END
+  /* 24. taken branch in EX squashes a JAL in ID: 3 + end */
+  BLOCK(24, 4)
+  beq  x0, x0, 24f
+  jal  x0, fail_handler
+24:
+  END
+  RVC
   PASS

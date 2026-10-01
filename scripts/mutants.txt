@@ -1,0 +1,597 @@
+# Planted bugs for scripts/mutate.py. Format: see the script header.
+# Each mutant names the testbenches expected to catch it, in the order they are tried.
+
+# ------------------------------------------------------------------ px_alu
+[A01] rtl/core/px_alu.sv tb_px_alu,tb_px_alu_golden
+- assign lt_o  = (a_i[31] != b_i[31]) ? a_i[31] : diff[31];
++ assign lt_o  = (a_i[31] != b_i[31]) ? b_i[31] : diff[31];
+# signed compare inverted for operands of different sign
+
+[A02] rtl/core/px_alu.sv tb_px_alu,tb_px_alu_golden
+- assign sra_res = $signed(a_i) >>> shamt;
++ assign sra_res = a_i >> shamt;
+# SRA done as SRL
+
+[A03] rtl/core/px_alu.sv tb_px_alu,tb_px_alu_golden
+- assign sll_res = a_i << shamt;
++ assign sll_res = a_i << b_i;
+# SLL uses all 32 bits of b as the shift amount
+
+[A04] rtl/core/px_alu.sv tb_px_alu,tb_px_alu_golden
+- assign ltu_o = diff[32];
++ assign ltu_o = diff[31];
+# unsigned compare taken from the wrong bit
+
+[A05] rtl/core/px_alu.sv tb_px_alu,tb_px_alu_golden
+- ALU_OR:   result_o = a_i | b_i;
++ ALU_OR:   result_o = a_i ^ b_i;
+# OR done as XOR
+
+[A06] rtl/core/px_alu.sv tb_px_alu
+- default:  result_o = 32'd0;
++ default:  result_o = sum;
+# undefined op code does not return 0
+
+[A07] rtl/core/px_alu.sv tb_px_alu,tb_px_alu_golden equivalent
+- assign shamt   = b_i[4:0];
++ assign shamt   = b_i[4:0] & 5'b11111;
+# equivalent: masking with all ones changes nothing (control for the classification)
+
+# ------------------------------------------------------------------ px_regfile
+[R01] rtl/core/px_regfile.sv tb_px_regfile
+- else if (sel0) q <= wdata0_i;   // port 0 wins a same-address collision
++ else if (sel0 && !sel1) q <= wdata0_i;
+# port 1 wins a same-address collision
+
+[R02] rtl/core/px_regfile.sv tb_px_regfile
+- else if (we1 && wa1 == addr)   return wd1;
++ else if (1'b0)   return wd1;
+# no write-through from port 1
+
+[R03] rtl/core/px_regfile.sv tb_px_regfile
+- assign sel0 = (bank_i == b[0]) && we0_i && (waddr0_i == r[4:0]);
++ assign sel0 = we0_i && (waddr0_i == r[4:0]);
+# port 0 writes ignore the bank
+
+[R04] rtl/core/px_regfile.sv tb_px_regfile
+- assign rdata_a_o = rst_ni ? read_port(
++ assign rdata_a_o = 1'b1 ? read_port(
+# port a not forced to zero during reset
+
+[R05] rtl/core/px_regfile.sv tb_px_regfile
+- if (addr == 5'd0)              return 32'd0;
++ if (1'b0)              return 32'd0;
+# x0 read is not forced to zero (write-through to x0 visible)
+
+[R06] rtl/core/px_regfile.sv tb_px_regfile
+- if (!rst_ni)   q <= 32'd0;
++ if (!rst_ni)   q <= q;
+# reset does not clear the registers
+
+[R07] rtl/core/px_regfile.sv tb_px_regfile
+- assign stored_c = rf[{bank_i, raddr_c_i}];
++ assign stored_c = rf[{1'b0, raddr_c_i}];
+# port c always reads bank 0
+
+# ------------------------------------------------------------------ px_decoder
+[D01] rtl/core/px_decoder.sv tb_px_decoder
+- if (f3 != 3'b000) legal = 1'b0;
++ if (1'b0) legal = 1'b0;
+# JALR with nonzero funct3 accepted
+
+[D02] rtl/core/px_decoder.sv tb_px_decoder
+- instr_i[31], instr_i[7], instr_i[30:25], instr_i[11:8], 1'b0};
++ instr_i[7], instr_i[31], instr_i[30:25], instr_i[11:8], 1'b0};
+# branch immediate bits 11 and 12 swapped
+
+[D03] rtl/core/px_decoder.sv tb_px_decoder
+- if (f3 == F3_SLL && f7 != F7_BASE) legal = 1'b0;
++ if (1'b0) legal = 1'b0;
+# SLLI with a nonzero funct7 (RV64 shift amount) accepted
+
+[D04] rtl/core/px_decoder.sv tb_px_decoder
+- d.csr_read    = !((f3_lo == 2'b01) && (rd == 5'd0));
++ d.csr_read    = 1'b1;
+# CSRRW with rd = x0 still reads the CSR (read side effect)
+
+[D05] rtl/core/px_decoder.sv tb_px_decoder
+- if (rd == 5'd0) d.rd_we = 1'b0;
++ if (1'b0) d.rd_we = 1'b0;
+# rd_we set for rd = x0
+
+[D06] rtl/core/px_decoder.sv tb_px_decoder
+- else if (f3 == F3_FENCE_I) d.is_fence_i = 1'b1;
++ else if (f3 == F3_FENCE_I) d.is_fence = 1'b1;
+# FENCE.I decoded as FENCE (no refetch)
+
+[D07] rtl/core/px_decoder.sv tb_px_decoder
+- d.is_store = 1'b1;\n        d.rs1_used = 1'b1;\n        d.rs2_used = 1'b1;
++ d.is_store = 1'b1;\n        d.rs1_used = 1'b1;\n        d.rs2_used = 1'b0;
+# store data register not marked as used (no load-use stall on store data)
+
+[D08] rtl/core/px_decoder.sv tb_px_decoder
+- else if (sys_imm == 12'h105)    d.is_wfi    = 1'b1;
++ else if (sys_imm == 12'h105)    legal = 1'b0;
+# WFI rejected as illegal
+
+# ------------------------------------------------------------------ px_decompressor
+[C01] rtl/core/px_decompressor.sv tb_px_decompressor
+- assign w_j    = {imm_cj[20], imm_cj[10:1], imm_cj[11], imm_cj[19:12], 5'd0, OPC_JAL};
++ assign w_j    = {imm_cj[20], imm_cj[10:1], imm_cj[11], imm_cj[19:12], 5'd1, OPC_JAL};
+# C.J links x1
+
+[C02] rtl/core/px_decompressor.sv tb_px_decompressor
+- assign rd_p     = {2'b01, instr_i[4:2]};
++ assign rd_p     = {2'b00, instr_i[4:2]};
+# rd' maps to x0..x7
+
+[C03] rtl/core/px_decompressor.sv tb_px_decompressor
+- if (imm_addi4spn == 12'd0) ill = 1'b1;
++ if (1'b0) ill = 1'b1;
+# C.ADDI4SPN with a zero immediate (including 0x0000) accepted
+
+[C04] rtl/core/px_decompressor.sv tb_px_decompressor
+- assign w_beqz = {imm_cb[12], imm_cb[10:5], 5'd0, rs1_p, F3_BEQ,
++ assign w_beqz = {imm_cb[12], imm_cb[10:5], 5'd0, rs1_p, F3_BNE,
+# C.BEQZ expands to BNE
+
+[C05] rtl/core/px_decompressor.sv tb_px_decompressor
+- assign imm_lwsp     = {4'd0, instr_i[3:2], instr_i[12], instr_i[6:4], 2'b00};
++ assign imm_lwsp     = {4'd0, instr_i[12], instr_i[3:2], instr_i[6:4], 2'b00};
+# C.LWSP immediate bits scrambled
+
+[C06] rtl/core/px_decompressor.sv tb_px_decompressor
+- ill              ? {16'd0, c_instr} : exp;
++ ill              ? exp : exp;
+# illegal compressed word loses its original bits (mtval)
+
+[C07] rtl/core/px_decompressor.sv tb_px_decompressor
+- if (rd_full == 5'd0) ill = 1'b1;\n          end\n          3'b100: begin
++ if (1'b0) ill = 1'b1;\n          end\n          3'b100: begin
+# C.LWSP with rd = x0 accepted
+
+# ------------------------------------------------------------------ px_core
+[P01] rtl/core/px_core.sv tb_core
+- assign fwd_b   = fwd_b_q ? wb_result_q : ex_rs2_q;
++ assign fwd_b   = ex_rs2_q;
+# no WB-to-EX forwarding on rs2
+
+[P02] rtl/core/px_core.sv tb_core,tb_core_random equivalent
+- assign fwd_a_d = ex_to_wb && ex_dec_q.rd_we && !ex_dec_q.is_load && (ex_dec_q.rd == dec.rs1);
++ assign fwd_a_d = ex_to_wb && ex_dec_q.rd_we && (ex_dec_q.rd == dec.rs1);
+# equivalent: loads in WB would forward their address, but the load-use stall means no
+# instruction that uses the loaded register is ever in EX while the load is in WB; for
+# an unused rs1 field the forwarded value is ignored
+
+[P03] rtl/core/px_core.sv tb_core
+- (dec.rs2_used && dec.rs2 == ex_dec_q.rd));
++ 1'b0);
+# load-use hazard not detected on rs2
+
+[P04] rtl/core/px_core.sv tb_core
+- assign data_req_o   = ex_mem_go && !wb_wait && !wb_bus_err;
++ assign data_req_o   = ex_mem_go && !wb_bus_err;
+# younger access issued while the older one still waits for its response
+
+[P05] rtl/core/px_core.sv tb_core
+- assign data_req_o   = ex_mem_go && !wb_wait && !wb_bus_err;
++ assign data_req_o   = ex_mem_go && !wb_wait;
+# younger access issued in the cycle the older one returns a bus error
+
+[P06] rtl/core/px_core.sv tb_core
+- end else if (wb_bus_err || ex_redirect) begin\n      ex_valid_q <= 1'b0;
++ end else if (ex_redirect) begin\n      ex_valid_q <= 1'b0;
+# a WB bus error does not flush EX
+
+[P07] rtl/core/px_core.sv tb_core equivalent
+- assign id_redirect = id_valid_q && !id_hold && !ex_redirect && !wb_bus_err &&
++ assign id_redirect = id_valid_q && !id_hold && !ex_redirect &&
+# equivalent: JAL in ID "redirects" in the cycle an older access traps, but the redirect
+# PC mux gives the WB bus error priority and the ID/EX and IF/ID registers are flushed by
+# it anyway (the term is a redundant guard; t09 section C exercises the coincidence)
+
+[P08] rtl/core/px_core.sv tb_core equivalent
+- assign id_redirect = id_valid_q && !id_hold && !ex_redirect && !wb_bus_err &&
++ assign id_redirect = id_valid_q && !id_hold && !wb_bus_err &&
+# equivalent: the redirect PC mux selects the EX target before the JAL target and the EX
+# redirect flushes IF/ID and ID/EX, so the guard is redundant (t09 section E exercises it)
+
+[P09] rtl/core/px_core.sv tb_core
+- ex_rs1_q   <= fwd_a;\n      ex_rs2_q   <= fwd_b;
++ ex_rs1_q   <= ex_rs1_q;\n      ex_rs2_q   <= ex_rs2_q;
+# operands of an instruction held in EX not refreshed from WB
+
+[P10] rtl/core/px_core.sv tb_core
+- ((ex_size == MEM_H && addr_lo[0]) ||
++ ((ex_size == MEM_H && 1'b0) ||
+# misaligned halfword accesses not detected
+
+[P11] rtl/core/px_core.sv tb_core
+- assign ld_byte_sign = !wb_unsigned_q && ld_byte[7];
++ assign ld_byte_sign = ld_byte[7];
+# LBU sign-extends
+
+[P12] rtl/core/px_core.sv tb_core
+- OPB_LINK: alu_b = ex_is_c_q ? 32'd2 : 32'd4;
++ OPB_LINK: alu_b = 32'd4;
+# C.JAL/C.JALR link PC + 4
+
+[P13] rtl/core/px_core.sv tb_core
+- assign jalr_target   = jalr_sum & ~32'd1;
++ assign jalr_target   = jalr_sum;
+# JALR does not clear bit 0
+
+[P14] rtl/core/px_core.sv tb_core
+- assign wb_retire = wb_valid_q && !wb_wait && !wb_bus_err;
++ assign wb_retire = wb_valid_q && !wb_wait;
+# a load with a bus error still writes rd and retires
+
+[P15] rtl/core/px_core.sv tb_core
+- ex_cause = EXC_BREAK;   ex_tval = ex_pc_q;
++ ex_cause = EXC_BREAK;   ex_tval = 32'd0;
+# EBREAK mtval not the PC
+
+[P16] rtl/core/px_core.sv tb_core
+- ex_tval = ex_ferr_hi_q ? ex_pc_q + 32'd2 : ex_pc_q;
++ ex_tval = ex_pc_q;
+# fetch fault on the second half of a straddling instruction reports pc (audit finding)
+
+[P17] rtl/core/px_core.sv tb_core
+- F3_BGE:  br_cond = !alu_lt;
++ F3_BGE:  br_cond = !alu_lt && !alu_eq;
+# BGE not taken for equal operands
+
+[P18] rtl/core/px_core.sv tb_core
+- assign store_data = fwd_b << {addr_lo, 3'b000};
++ assign store_data = fwd_b;
+# store data not moved to the addressed byte lanes
+
+[P19] rtl/core/px_core.sv tb_core
+- if (wb_bus_err || ex_trap)       if_redirect_pc = csr_mtvec;
++ if (ex_trap)                     if_redirect_pc = csr_mtvec;
+# a WB bus error redirects to the wrong address
+
+[P20] rtl/core/px_core.sv tb_core
+- assign ex_hold = wb_wait || (ex_mem_go && !data_gnt_i) || div_wait;
++ assign ex_hold = wb_wait || div_wait;
+# EX does not wait for the data grant (request dropped, instruction lost)
+
+# ------------------------------------------------------------------ px_if_stage
+[F01] rtl/core/px_if_stage.sv tb_core
+- localparam int MAX_OUT = 1;
++ localparam int MAX_OUT = 2;
+# two requests outstanding (the audit's contract finding)
+
+[F02] rtl/core/px_if_stage.sv tb_core
+- assign req           = run_q && (pend_q || (out_ok && (redirect_i || space_ok)));
++ assign req           = (pend_q || (out_ok && (redirect_i || space_ok)));
+# request raised while reset is asserted (audit finding)
+
+[F03] rtl/core/px_if_stage.sv tb_core
+- discard_d = outst_q - {1'b0, instr_rvalid_i};
++ discard_d = 2'd0;
+# responses to requests issued before a redirect are not dropped
+
+[F04] rtl/core/px_if_stage.sv tb_core
+- assign instr_addr_o  = pend_q ? pend_addr_q : redirect_i ? redirect_word : seq_addr;
++ assign instr_addr_o  = redirect_i ? redirect_word : pend_q ? pend_addr_q : seq_addr;
+# a held request changes its address on a redirect (OBI violation)
+
+[F05] rtl/core/px_if_stage.sv tb_core
+- if (stale_grant) discard_d = discard_d + 2'd1;
++ if (1'b0) discard_d = discard_d + 2'd1;
+# a held old-stream request granted after the redirect is not dropped
+
+[F06] rtl/core/px_if_stage.sv tb_core
+- assign aligned_valid = (avail == 3'd0) ? 1'b0 : ((avail >= need) || e0);
++ assign aligned_valid = (avail >= need) || e0;
+# validity computed from bus data when no word is available (step 1.5 X bug)
+
+[F07] rtl/core/px_if_stage.sv tb_core
+- assign aligned_err   = e0 || (need == 3'd2 && e1);
++ assign aligned_err   = e0;
+# fault on the second word of a straddling instruction ignored
+
+[F08] rtl/core/px_if_stage.sv tb_core
+- assign resp_keep = instr_rvalid_i && (discard_q == 2'd0);
++ assign resp_keep = instr_rvalid_i;
+# a response that must be dropped is used by the aligner
+
+[F09] rtl/core/px_if_stage.sv tb_core
+- assign space_ok      = ({1'b0, count_q} + {1'b0, outst_q}) < DEPTH[2:0];
++ assign space_ok      = ({1'b0, count_q} + {1'b0, outst_q}) <= DEPTH[2:0];
+# buffer space check off by one (overflow)
+
+[F10] rtl/core/px_if_stage.sv tb_core
+- assign fetch_err_hi_o  = aligned_err && !e0;
++ assign fetch_err_hi_o  = aligned_err;
+# first-word fetch faults also report pc + 2
+
+[F11] rtl/core/px_if_stage.sv tb_core,tb_core_random equivalent
+- assign valid_o         = aligned_valid && !redirect_i && !pend_stale_q;
++ assign valid_o         = aligned_valid && !redirect_i;
+# equivalent: while an old-stream request is still held, every response is dropped and
+# the buffer was cleared by the redirect, so no word is available anyway
+
+[F12] rtl/core/px_if_stage.sv tb_core
+- pc_d    = fire ? pc_q + (exp_c ? 32'd2 : 32'd4) : pc_q;
++ pc_d    = fire ? pc_q + 32'd4 : pc_q;
+# PC advances by 4 after compressed instructions
+
+# ------------------------------------------------------------------ audit optimizations
+[O01] rtl/core/px_core.sv tb_core
+- ex_rs2_q   <= fwd_b;\n      fwd_a_q    <= 1'b0;\n      fwd_b_q    <= 1'b0;
++ ex_rs2_q   <= fwd_b;\n      fwd_a_q    <= fwd_a_q;\n      fwd_b_q    <= fwd_b_q;
+# registered forwarding select kept after a hold cycle (forwards a bubble's result)
+
+[O02] rtl/core/px_core.sv tb_core
+- assign fwd_a_d = ex_to_wb && ex_dec_q.rd_we
++ assign fwd_a_d = ex_dec_q.rd_we
+# forwarding select set although the EX instruction does not move to WB
+
+[O03] rtl/core/px_if_stage.sv tb_core
+- seq_inc_d  = granted && !pend_q;
++ seq_inc_d  = granted;
+# after a redirect, a granted old-stream request makes the target word be skipped
+
+[O04] rtl/core/px_core.sv tb_core
+- id_instr_q[31], id_instr_q[19:12], id_instr_q[20],
++ id_instr_q[31], id_instr_q[19:12], id_instr_q[21],
+# JAL target adder takes the wrong immediate bit 11
+
+# ------------------------------------------------------------------ px_csr (step 1.6)
+[S01] rtl/core/px_csr.sv tb_px_csr
+- assign instret_lo = retire_i ? minstret_lo_inc : minstret_lo_q;
++ assign instret_lo = minstret_lo_q;
+# a minstret read misses an older instruction retiring in the same cycle
+
+[S02] rtl/core/px_csr.sv tb_px_csr
+- mpie_q        <= mie_q;\n      mie_q         <= 1'b0;
++ mpie_q        <= 1'b1;\n      mie_q         <= 1'b0;
+# trap entry does not save MIE in MPIE
+
+[S03] rtl/core/px_csr.sv tb_px_csr
+- mie_q         <= mpie_q;\n      mpie_q        <= 1'b1;
++ mie_q         <= mpie_q;\n      mpie_q        <= 1'b0;
+# MRET clears MPIE instead of setting it
+
+[S04] rtl/core/px_csr.sv tb_px_csr
+- CSR_MISA:      ex_rdata_o = 32'h4000_1104;
++ CSR_MISA:      ex_rdata_o = 32'h4000_0104;
+# misa does not advertise M although MUL/DIV are implemented
+
+[S05] rtl/core/px_csr.sv tb_px_csr
+- (id_write_i && id_addr_i[11:10] == 2'b11);
++ (id_write_i && id_addr_i[11:10] == 2'b10);
+# read-only address space decoded wrongly: writes to mhartid accepted
+
+[S06] rtl/core/px_csr.sv tb_px_csr
+- if (w_mcycle)       mcycle_lo_q <= wval;
++ if (w_mcycle)       mcycle_lo_q <= wval + 32'd1;
+# an mcycle write also counts the write cycle
+
+[S07] rtl/core/px_csr.sv tb_px_csr
+- assign we = ex_commit_i && ex_write_i && !trap_i && !mret_i;
++ assign we = ex_write_i && !trap_i && !mret_i;
+# CSR write without commit (stalled or cancelled accesses write)
+
+[S08] rtl/core/px_csr.sv tb_px_csr
+- assign w_base = wval[31:2];
++ assign w_base = wval[29:0];
+# mtvec BASE taken from the wrong bits
+
+[S09] rtl/core/px_csr.sv tb_px_csr
+- assign minstret_hi_inc = minstret_hi_q + {31'd0, &minstret_lo_q};
++ assign minstret_hi_inc = minstret_hi_q;
+# no carry from minstret into minstreth
+
+[S10] rtl/core/px_csr.sv tb_px_csr
+- minstret_hi_q <= w_minstreth ? wval : instret_hi;
++ minstret_hi_q <= w_minstreth ? wval : (w_minstret ? minstret_hi_q : instret_hi);
+# a minstret write drops the carry of an older instruction retiring in the same cycle
+
+[S11] rtl/core/px_csr.sv tb_px_csr
+- assign w_irq  = wval[31];
++ assign w_irq  = wval[30];
+# mcause interrupt bit written from the wrong bit
+
+[S12] rtl/core/px_csr.sv tb_px_csr
+- if (a >= CSR_MHPMCOUNTER3  && a <= CSR_MHPMCOUNTER31)  e = 1'b1;
++ if (a >= CSR_MHPMCOUNTER3  && a <= 12'hB20)            e = 1'b1;
+# a nonexistent CSR (0xB20) accepted
+
+[S13] rtl/core/px_csr.sv tb_px_csr
+- assign w_mpie = wval[MSTATUS_MPIE];
++ assign w_mpie = wval[MSTATUS_MIE];
+# mstatus.MPIE written from the MIE bit
+
+[S14] rtl/core/px_csr.sv tb_px_csr
+- mcycle_hi_q <= mcycle_hi_inc;
++ mcycle_hi_q <= mcycle_hi_q;
+# no carry from mcycle into mcycleh
+
+# ------------------------------------------------------------------ CSR integration (step 1.6)
+[K01] rtl/core/px_core.sv tb_core
+- assign csr_commit  = ex_to_wb && ex_dec_q.csr_en;
++ assign csr_commit  = ex_valid_q && !ex_hold && !ex_exc && ex_dec_q.csr_en;
+# a CSR write behind an older faulting load/store still happens
+
+[K02] rtl/core/px_core.sv tb_core,tb_core_random
+- assign csr_commit  = ex_to_wb && ex_dec_q.csr_en;
++ assign csr_commit  = ex_valid_q && !ex_exc && !wb_bus_err && ex_dec_q.csr_en;
+# a CSR access held in EX behind an older load commits in every held cycle
+
+[K03] rtl/core/px_core.sv tb_core
+- wb_noinc_q    <= ex_dec_q.csr_en && csr_noinc;
++ wb_noinc_q    <= 1'b0;
+# the instruction that writes minstret also counts itself
+
+[K04] rtl/core/px_core.sv tb_core,tb_core_random
+- assign wb_count  = wb_retire && !wb_noinc_q;
++ assign wb_count  = wb_valid_q && !wb_noinc_q;
+# minstret counts WB instructions that wait or fault
+
+[K05] rtl/core/px_core.sv tb_core
+- (dec.csr_en && id_csr_illegal);
++ 1'b0;
+# illegal CSR accesses (unimplemented, read-only write) do not trap
+
+[K06] rtl/core/px_core.sv tb_core
+- else if (ex_is_mret)           if_redirect_pc = csr_mepc;
++ else if (ex_is_mret)           if_redirect_pc = fencei_target;
+# MRET falls through instead of returning to mepc
+
+[K07] rtl/core/px_core.sv tb_core
+- assign mret_commit = ex_to_wb && ex_dec_q.is_mret;
++ assign mret_commit = ex_valid_q && ex_dec_q.is_mret;
+# MRET changes mstatus while held or behind an older bus error
+
+[K08] rtl/core/px_core.sv tb_core
+- assign csr_operand = ex_dec_q.csr_use_imm ? ex_imm : fwd_a;
++ assign csr_operand = ex_dec_q.csr_use_imm ? ex_imm : ex_rs1_q;
+# CSR source operand not forwarded from WB
+
+[K09] rtl/core/px_core.sv tb_core
+- assign fwd_a_d = ex_to_wb && ex_dec_q.rd_we && !ex_dec_q.is_load && (ex_dec_q.rd == dec.rs1);
++ assign fwd_a_d = ex_to_wb && ex_dec_q.rd_we && !ex_dec_q.is_load && !ex_dec_q.csr_en && (ex_dec_q.rd == dec.rs1);
+# a CSR read result is not forwarded to the next instruction's rs1
+
+[K10] rtl/core/px_core.sv tb_core
+- .ex_write_i   (ex_dec_q.csr_write),
++ .ex_write_i   (1'b1),
+# write suppression ignored: CSRRS/CSRRC with rs1 = x0 write (the old value back)
+
+[K11] rtl/core/px_core.sv tb_core
+- .id_write_i   (dec.csr_write),
++ .id_write_i   (1'b1),
+# legality check assumes a write: csrrs rd, mhartid, x0 traps
+
+[K12] rtl/core/px_core.sv tb_core
+- .id_write_i   (dec.csr_write),
++ .id_write_i   (dec.csr_write && dec.rs1 != 5'd0),
+# write attempt decided by the rs1 field for CSRRW too: csrrw x0, cycle, x0 is accepted as a read
+
+[K13] rtl/core/px_core.sv tb_core
+- .trap_pc_i    (trap_pc_o),
++ .trap_pc_i    (ex_pc_q),
+# mepc of a WB bus error is the younger instruction's PC
+
+[K14] rtl/core/px_core.sv tb_core
+- assign mret_commit = ex_to_wb && ex_dec_q.is_mret;
++ assign mret_commit = 1'b0;
+# MRET redirects but does not restore MIE/MPIE
+
+# ------------------------------------------------------------------ px_mul (step 1.7)
+[M01] rtl/core/px_mul.sv tb_px_mul
+- assign a_signed = (op_i == 2'b01) || (op_i == 2'b10);    // MULH, MULHSU
++ assign a_signed = (op_i == 2'b01);
+# MULHSU treats rs1 as unsigned
+
+[M02] rtl/core/px_mul.sv tb_px_mul
+- assign b_signed = (op_i == 2'b01);                        // MULH
++ assign b_signed = op_i[0];
+# MULHU treats rs2 as signed
+
+[M03] rtl/core/px_mul.sv tb_px_mul
+- assign result_o = high_q ? product[63:32] : product[31:0];
++ assign result_o = high_q ? product[31:0] : product[63:32];
+# high and low words swapped
+
+[M04] rtl/core/px_mul.sv tb_px_mul
+- assign b_lo = {1'b0, b33[15:0]};
++ assign b_lo = {b33[15], b33[15:0]};
+# low partial product sign-extended instead of zero-extended
+
+[M05] rtl/core/px_mul.sv tb_px_mul
+- assign hi_shift = {p_hi_q, 16'd0};
++ assign hi_shift = {p_hi_q[46:0], 17'd0};
+# high partial product weighted 2^17 instead of 2^16
+
+[M06] rtl/core/px_mul.sv tb_px_mul
+- high_q <= (op_i != 2'b00);
++ high_q <= op_i[1];
+# MULH returns the low word
+
+# ------------------------------------------------------------------ px_div (step 1.7)
+[V01] rtl/core/px_div.sv tb_px_div
+- assign quo      = div0_q ? 32'hFFFF_FFFF :
++ assign quo      = div0_q ? 32'd0 :
+# divide by zero returns quotient 0
+
+[V02] rtl/core/px_div.sv tb_px_div
+- assign rem      = div0_q ? a_q :
++ assign rem      = div0_q ? 32'd0 :
+# remainder of a divide by zero is 0 instead of the dividend
+
+[V03] rtl/core/px_div.sv tb_px_div
+- assign r_neg    = signed_q && a_neg_q;
++ assign r_neg    = signed_q && b_neg_q;
+# remainder takes the divisor's sign
+
+[V04] rtl/core/px_div.sv tb_px_div
+- localparam logic [4:0] LAST = 5'd16;
++ localparam logic [4:0] LAST = 5'd17;
+# one cycle too many (18-cycle schedule)
+
+[V05] rtl/core/px_div.sv tb_px_div
+- assign done_o = active_q && (cnt_q == LAST);
++ assign done_o = active_q && (cnt_q == LAST || div0_q);
+# operand-dependent early completion for divide by zero (result still correct)
+
+[V06] rtl/core/px_div.sv tb_px_div
+- end else if (kill_i || !valid_i) begin
++ end else if (!valid_i) begin
+# kill ignored while the instruction is still marked valid
+
+[V07] rtl/core/px_div.sv tb_px_div
+- assign ub_is1 = (b_i == 32'd1) || (b_neg && b_i == 32'hFFFF_FFFF);
++ assign ub_is1 = (b_i == 32'd1);
+# first digit wrong for a divisor of -1
+
+[V08] rtl/core/px_div.sv tb_px_div
+- assign q_neg    = signed_q && (a_neg_q != b_neg_q) && !div0_q;
++ assign q_neg    = signed_q && a_neg_q && !div0_q;
+# quotient sign ignores the divisor
+
+[V09] rtl/core/px_div.sv tb_px_div
+- assign dig = !t3[35] ? 2'd3 : !t2[35] ? 2'd2 : !t1[35] ? 2'd1 : 2'd0;
++ assign dig = !t2[35] ? 2'd2 : !t3[35] ? 2'd3 : !t1[35] ? 2'd1 : 2'd0;
+# radix-4 digit selection checks 2|d| before 3|d|
+
+# ------------------------------------------------------------------ MUL/DIV integration (step 1.7)
+[I01] rtl/core/px_core.sv tb_core
+- (ex_dec_q.is_load || ex_is_mul)
++ ex_dec_q.is_load
+# no MUL-use stall: the consumer reads the result before it exists (forwarded too early)
+
+[I02] rtl/core/px_core.sv tb_core
+- .kill_i  (wb_bus_err),
++ .kill_i  (1'b0),
+# kill input tied off: after a flush the divider keeps running for one cycle until valid_i
+# falls (no architectural effect in Phase 1; caught by the tb_core divider monitor). Phase 2
+# interrupt entry needs kill_i, because the divide may still look valid in that cycle.
+
+[I03] rtl/core/px_core.sv tb_core
+- assign div_valid  = ex_valid_q && ex_is_div && !ex_exc;
++ assign div_valid  = ex_is_div && !ex_exc;
+# a flushed (killed) divide keeps running from the stale decode
+
+[I04] rtl/core/px_core.sv tb_core
+- assign div_wait   = div_valid && !div_done;
++ assign div_wait   = 1'b0;
+# EX does not wait for the divider
+
+[I05] rtl/core/px_core.sv tb_core
+- .b_i     (fwd_b),\n    .done_o
++ .b_i     (ex_rs2_q),\n    .done_o
+# divisor not forwarded from WB
+
+[I06] rtl/core/px_core.sv tb_core
+- wb_is_mul_q   <= ex_is_mul;
++ wb_is_mul_q   <= ex_dec_q.muldiv_en;
+# divide results replaced by the multiplier output in WB
+
+[I07] rtl/core/px_core.sv tb_core
+- assign ex_is_div = ex_dec_q.muldiv_en &&  ex_dec_q.muldiv_op[2];
++ assign ex_is_div = ex_dec_q.muldiv_en &&  ex_dec_q.muldiv_op[2] && ex_dec_q.muldiv_op[1];
+# DIV/DIVU not recognized as divides (only REM/REMU run the divider)

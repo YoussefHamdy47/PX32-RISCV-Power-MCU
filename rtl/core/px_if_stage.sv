@@ -5,9 +5,13 @@
 // Fetch protocol (OBI-style, guide § 5.1)
 //   - Word-aligned requests from instr_addr_o. A request that is not granted is held
 //     with the same address until it is (OBI rule), even across a redirect.
-//   - At most 2 requests outstanding; responses return in order.
+//   - At most 1 request outstanding (IMPLEMENTATION_CONTRACTS.md § 3.2); the next grant
+//     may coincide with the response, which keeps single-cycle memories at one word
+//     per cycle. D-021 records why the earlier two-request version was changed.
+//   - No request while reset is asserted: the first request is raised in the cycle
+//     after reset release.
 //   - Up to 3 fetched words are buffered. A new request is issued only when the buffer
-//     plus the outstanding requests leave room for its response.
+//     plus the outstanding request leave room for its response.
 //
 // Alignment
 //   The instruction at pc_q may start in either half of a word. A 32-bit instruction in
@@ -27,6 +31,9 @@
 //
 // Output to ID: valid_o/ready_i handshake. instr_o is the expanded 32-bit instruction,
 // raw_o the original bits (16-bit ones zero-extended, for mtval and the trace).
+// fetch_err_o marks a fetch fault; fetch_err_hi_o additionally says that only the second
+// word of a straddling 32-bit instruction faulted, so mtval is pc + 2 (the address of the
+// faulting half, privileged spec § 3.1.16) instead of pc.
 
 `timescale 1ns/1ps
 
@@ -47,6 +54,7 @@ module px_if_stage #(
   output logic        is_compressed_o,
   output logic        illegal_c_o,
   output logic        fetch_err_o,
+  output logic        fetch_err_hi_o,
 
   output logic        instr_req_o,
   input  logic        instr_gnt_i,
@@ -57,13 +65,18 @@ module px_if_stage #(
 );
 
   localparam int DEPTH   = 3;
-  localparam int MAX_OUT = 2;
+  localparam int MAX_OUT = 1;
 
   // ---------------------------------------------------------------------------
   // State
   // ---------------------------------------------------------------------------
   logic [31:0] pc_q, pc_d;
-  logic [31:0] fetch_addr_q, fetch_addr_d;      // next word to request
+  // Next sequential word to request: seq_base_q + (seq_inc_q ? 4 : 0). Keeping the
+  // increment as a flag moves the incrementer behind flops only, off the redirect path
+  // (a redirect stores the target word directly).
+  logic [31:0] seq_base_q, seq_base_d;
+  logic        seq_inc_q, seq_inc_d;
+  logic [31:0] seq_addr;
   logic [31:0] buf0_q, buf1_q, buf2_q;
   logic        err0_q, err1_q, err2_q;
   logic [1:0]  count_q, count_d;
@@ -72,6 +85,7 @@ module px_if_stage #(
   logic        pend_q, pend_d;                   // request raised last cycle, not granted
   logic        pend_stale_q, pend_stale_d;       // ... and it belongs to the old stream
   logic [31:0] pend_addr_q, pend_addr_d;
+  logic        run_q;                            // reset released (no request in reset)
 
   // ---------------------------------------------------------------------------
   // Word view: buffer entries followed by this cycle's (kept) response
@@ -142,6 +156,7 @@ module px_if_stage #(
   assign is_compressed_o = exp_c;
   assign illegal_c_o     = exp_ill && !aligned_err;
   assign fetch_err_o     = aligned_err;
+  assign fetch_err_hi_o  = aligned_err && !e0;
 
   // ---------------------------------------------------------------------------
   // Request
@@ -152,9 +167,10 @@ module px_if_stage #(
   assign redirect_word = {redirect_pc_i[31:2], 2'b00};
   assign out_ok        = (outst_q < MAX_OUT[1:0]) || instr_rvalid_i;
   assign space_ok      = ({1'b0, count_q} + {1'b0, outst_q}) < DEPTH[2:0];
-  assign req           = pend_q || (out_ok && (redirect_i || space_ok));
+  assign req           = run_q && (pend_q || (out_ok && (redirect_i || space_ok)));
   assign instr_req_o   = req;
-  assign instr_addr_o  = pend_q ? pend_addr_q : redirect_i ? redirect_word : fetch_addr_q;
+  assign seq_addr      = seq_inc_q ? seq_base_q + 32'd4 : seq_base_q;
+  assign instr_addr_o  = pend_q ? pend_addr_q : redirect_i ? redirect_word : seq_addr;
   assign granted       = req && instr_gnt_i;
   assign stale_grant   = granted && pend_q && (pend_stale_q || redirect_i);
 
@@ -176,9 +192,6 @@ module px_if_stage #(
   logic [1:0] n_count_lo;
   assign n_count_lo = avail[1:0] - {1'b0, pop_now};
 
-  logic [31:0] base_addr;
-  assign base_addr = redirect_i ? redirect_word : fetch_addr_q;
-
   always_comb begin
     // outstanding / discard bookkeeping
     outst_d = outst_q + {1'b0, granted} - {1'b0, instr_rvalid_i};
@@ -193,8 +206,17 @@ module px_if_stage #(
     pend_addr_d  = instr_addr_o;
     pend_stale_d = pend_d && (pend_q ? (pend_stale_q || redirect_i) : 1'b0);
 
-    // next request address
-    fetch_addr_d = (granted && !stale_grant) ? base_addr + 32'd4 : base_addr;
+    // next sequential request address
+    if (redirect_i) begin
+      seq_base_d = redirect_word;
+      seq_inc_d  = granted && !pend_q;        // the target itself was requested now
+    end else if (granted && !stale_grant) begin
+      seq_base_d = instr_addr_o;
+      seq_inc_d  = 1'b1;
+    end else begin
+      seq_base_d = seq_base_q;
+      seq_inc_d  = seq_inc_q;
+    end
 
     // buffer and PC
     if (redirect_i) begin
@@ -209,7 +231,9 @@ module px_if_stage #(
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
       pc_q         <= BOOT_ADDR;
-      fetch_addr_q <= {BOOT_ADDR[31:2], 2'b00};
+      run_q        <= 1'b0;
+      seq_base_q   <= {BOOT_ADDR[31:2], 2'b00};
+      seq_inc_q    <= 1'b0;
       count_q      <= 2'd0;
       outst_q      <= 2'd0;
       discard_q    <= 2'd0;
@@ -220,7 +244,9 @@ module px_if_stage #(
       err0_q <= 1'b0;  err1_q <= 1'b0;  err2_q <= 1'b0;
     end else begin
       pc_q         <= pc_d;
-      fetch_addr_q <= fetch_addr_d;
+      run_q        <= 1'b1;
+      seq_base_q   <= seq_base_d;
+      seq_inc_q    <= seq_inc_d;
       count_q      <= count_d;
       outst_q      <= outst_d;
       discard_q    <= discard_d;

@@ -1,44 +1,65 @@
-// px_core: PX32 4-stage in-order pipeline (Phase 1, step 1.5).
+// px_core: PX32 4-stage in-order pipeline (Phase 1, steps 1.5 to 1.7).
 //
 // Implements ARCHITECTURE.md § 4.1 and IMPLEMENTATION_CONTRACTS.md § 2.3 for the Phase 1
-// subset: RV32I + C, Zifencei, machine mode.
+// subset: RV32IMC, Zicsr, Zifencei, machine mode.
 //
 //   IF      px_if_stage: prefetch buffer, aligner, RVC expansion
 //   ID      px_decoder, px_regfile read (write-through covers WB -> ID), JAL resolution,
-//           load-use hazard detection
-//   EX      px_alu with forwarding from WB, branch/JALR/FENCE.I resolution, data request,
+//           load-use hazard detection, CSR legality (px_csr)
+//   EX      px_alu with forwarding from WB, branch/JALR/FENCE.I/MRET resolution, data
+//           request, CSR access (px_csr), multiplier stage 1 (px_mul), divider (px_div),
 //           synchronous exception detection
-//   MEM/WB  load alignment and extension, register write, retirement trace, bus errors
+//   MEM/WB  load alignment and extension, multiplier stage 2, register write, retirement
+//           trace, bus errors
 //
 // Timing with single-cycle memories (targets from ARCHITECTURE.md § 4.1)
 //   ALU op 1 cycle; load 1 cycle plus 1 if the next instruction uses the result;
-//   taken branch, JALR and FENCE.I 3 cycles (resolved in EX); JAL 2 cycles (resolved in ID).
+//   taken branch, JALR, FENCE.I and MRET 3 cycles (resolved in EX); JAL 2 cycles
+//   (resolved in ID); CSR access 1 cycle; trap entry 3 cycles from the trapping
+//   instruction in EX to the first handler instruction in EX (D-020 adds 1 for a 32-bit
+//   target at a halfword offset).
+//   MUL: throughput 1, latency 2: the result is formed in WB and not forwarded, so an
+//   instruction that uses it immediately stalls one cycle in ID, like a load (D-023).
+//   DIV/REM: the instruction occupies EX for exactly 17 cycles for every operand and holds
+//   the pipeline behind it; its result is forwarded from WB, so the next instruction,
+//   dependent or not, reaches EX 17 cycles after the divide did (D-023).
 //
 // Exceptions and ordering
-//   - Fetch faults, illegal instructions, ECALL/EBREAK and misaligned loads/stores are
-//     raised when the instruction is in EX and every older instruction has completed:
-//     the instruction does not retire, younger ones are flushed.
+//   - Fetch faults, illegal instructions (including illegal CSR accesses), ECALL/EBREAK and
+//     misaligned loads/stores are raised when the instruction is in EX and every older
+//     instruction has completed: the instruction does not retire, younger ones are flushed.
 //   - A load/store bus error is raised in WB when the response arrives. The data request
 //     of the next instruction (in EX) is only issued once the older access has completed
 //     without error, so no younger access can have a side effect.
 //   - Priority follows the privileged spec: fetch fault, illegal, breakpoint/ECALL,
-//     misaligned address; a WB bus error (older instruction) beats anything in EX.
+//     misaligned address; a WB bus error (older instruction) beats anything in EX,
+//     including a CSR access or MRET.
+//   - CSR accesses and MRET take effect at the EX commit point (ex_to_wb: valid, not
+//     held, no exception, no older bus error), the same rule that gates data requests, so
+//     stalled, flushed, wrong-path and faulting instructions never change CSR state and
+//     each access happens exactly once. The instruction behind a CSR write reads the new
+//     value (it reaches EX one cycle later); no pipeline flush is needed in Phase 1.
+//   - Trap entry (px_csr): mepc = trapping PC, mcause, mtval, MPIE = MIE, MIE = 0; the
+//     redirect goes to mtvec (Direct mode). MRET redirects to mepc like a JALR.
+//   - minstret counts retirements in WB; the retirement of an instruction that wrote
+//     minstret/minstreth is not counted (the write replaces its increment, D-022).
+//   - MUL and DIV results reach the register file only when the instruction retires in
+//     WB. A divide that is flushed from EX (older bus error; Phase 2 adds interrupt entry)
+//     is abandoned by px_div (kill) and restarts from its first cycle when fetched again.
 //
-// Staged features (tracked in PROGRESS.md; each is illegal until its step lands)
-//   - CSR instructions and MRET: step 1.6 (CSR unit). Trap entry currently jumps to
-//     trap_vector_i and reports the trap on trap_*_o; mtvec/mepc/mcause come with 1.6.
-//   - MUL/DIV: step 1.7.
+// Staged features (tracked in PROGRESS.md)
+//   - Interrupts: Phase 2 (CLIC).
 //   WFI executes as a NOP (allowed by the privileged spec); FENCE is a NOP (in-order
 //   core, no caches); FENCE.I refetches everything after it.
 
 `timescale 1ns/1ps
 
 module px_core #(
-  parameter logic [31:0] BOOT_ADDR = 32'h1000_0000
+  parameter logic [31:0] BOOT_ADDR   = 32'h1000_0000,
+  parameter logic [31:0] MTVEC_RESET = 32'h1000_0040   // mtvec after reset (D-022)
 ) (
   input  logic        clk_i,
   input  logic        rst_ni,
-  input  logic [31:0] trap_vector_i,
 
   // Instruction port (OBI-style)
   output logic        instr_req_o,
@@ -80,31 +101,26 @@ module px_core #(
 
   import px_pkg::*;
 
-  // Exception causes (privileged spec, mcause)
-  localparam logic [4:0] EXC_IACCESS = 5'd1;
-  localparam logic [4:0] EXC_ILLEGAL = 5'd2;
-  localparam logic [4:0] EXC_BREAK   = 5'd3;
-  localparam logic [4:0] EXC_LMISAL  = 5'd4;
-  localparam logic [4:0] EXC_LACCESS = 5'd5;
-  localparam logic [4:0] EXC_SMISAL  = 5'd6;
-  localparam logic [4:0] EXC_SACCESS = 5'd7;
-  localparam logic [4:0] EXC_ECALL_M = 5'd11;
+  // Exception causes: px_pkg EXC_*.
 
   // ===========================================================================
   // Control signals shared between stages (declared first, driven below)
   // ===========================================================================
   logic        wb_wait, wb_bus_err;
-  logic        ex_hold, ex_redirect, ex_trap;
+  logic        ex_hold, ex_redirect, ex_trap, ex_to_wb;
   logic        id_hold, id_redirect;
   logic        if_redirect;
   logic [31:0] if_redirect_pc;
+  logic        id_csr_illegal;
+  logic [31:0] csr_mtvec, csr_mepc;
+  logic        ex_is_mul, ex_is_div, div_done, div_wait;
 
   // ===========================================================================
   // IF
   // ===========================================================================
   logic        if_valid;
   logic [31:0] if_pc, if_instr, if_raw;
-  logic        if_is_c, if_ill_c, if_ferr;
+  logic        if_is_c, if_ill_c, if_ferr, if_ferr_hi;
 
   px_if_stage #(.BOOT_ADDR(BOOT_ADDR)) u_if (
     .clk_i, .rst_ni,
@@ -118,6 +134,7 @@ module px_core #(
     .is_compressed_o(if_is_c),
     .illegal_c_o    (if_ill_c),
     .fetch_err_o    (if_ferr),
+    .fetch_err_hi_o (if_ferr_hi),
     .instr_req_o, .instr_gnt_i, .instr_addr_o,
     .instr_rvalid_i, .instr_rdata_i, .instr_err_i
   );
@@ -127,15 +144,16 @@ module px_core #(
   // ===========================================================================
   logic        id_valid_q;
   logic [31:0] id_pc_q, id_instr_q, id_raw_q;
-  logic        id_is_c_q, id_ill_c_q, id_ferr_q;
+  logic        id_is_c_q, id_ill_c_q, id_ferr_q, id_ferr_hi_q;
 
   decode_t     dec;
   px_decoder u_dec (.instr_i(id_instr_q), .dec_o(dec));
 
-  // Features that arrive in later steps are illegal until then (see header).
-  logic id_unsupported, id_illegal;
-  assign id_unsupported = dec.csr_en || dec.is_mret || dec.muldiv_en;
-  assign id_illegal     = id_ill_c_q || dec.illegal || id_unsupported;
+  // A CSR access is illegal when px_csr rejects its address or its write attempt
+  // (decided on the encoding alone).
+  logic id_illegal;
+  assign id_illegal     = id_ill_c_q || dec.illegal ||
+                          (dec.csr_en && id_csr_illegal);
 
   // Register file (bank 0 only in Phase 1; port C and write port 1 unused)
   logic [31:0] rf_a, rf_b, rf_c_unused;
@@ -158,23 +176,30 @@ module px_core #(
   // ===========================================================================
   logic        ex_valid_q;
   logic [31:0] ex_pc_q, ex_raw_q;
-  logic        ex_is_c_q, ex_ferr_q, ex_ill_q;
-  // The full decode is carried into EX: the CSR and MUL/DIV fields are consumed by steps
-  // 1.6 and 1.7. Synthesis removes the flops of fields that are not yet used.
+  logic        ex_is_c_q, ex_ferr_q, ex_ferr_hi_q, ex_ill_q;
+  // The full decode is carried into EX. csr_read is not needed (no implemented CSR has
+  // read side effects) and some fields are unused in EX; synthesis removes their flops.
   /* verilator lint_off UNUSEDSIGNAL */
   decode_t     ex_dec_q;
   /* verilator lint_on UNUSEDSIGNAL */
   logic [31:0] ex_rs1_q, ex_rs2_q;
 
   // Load-use hazard: the instruction in ID needs the result of a load in EX.
+  // A multiply's result is formed in WB (D-023) and, like a load's, is not forwarded: its
+  // consumer waits in ID for one cycle and reads it through register-file write-through.
   logic load_use;
-  assign load_use = id_valid_q && ex_valid_q && ex_dec_q.is_load && ex_dec_q.rd_we &&
+  assign load_use = id_valid_q && ex_valid_q && (ex_dec_q.is_load || ex_is_mul) && ex_dec_q.rd_we &&
                     ((dec.rs1_used && dec.rs1 == ex_dec_q.rd) ||
                      (dec.rs2_used && dec.rs2 == ex_dec_q.rd));
 
-  // JAL is resolved in ID.
-  logic [31:0] jal_target;
-  assign jal_target = id_pc_q + dec.imm;
+  // JAL is resolved in ID. The target adder takes the J immediate straight from the
+  // instruction bits rather than dec.imm, which the decoder zeroes for illegal words: the
+  // adder then does not wait for the legality decode (id_redirect still requires a legal
+  // JAL, so the result is only used when the two are equal).
+  logic [31:0] id_imm_j, jal_target;
+  assign id_imm_j   = {{11{id_instr_q[31]}}, id_instr_q[31], id_instr_q[19:12], id_instr_q[20],
+                       id_instr_q[30:21], 1'b0};
+  assign jal_target = id_pc_q + id_imm_j;
 
   // ===========================================================================
   // EX/WB register (declared here: EX forwards from it)
@@ -182,7 +207,8 @@ module px_core #(
   logic        wb_valid_q;
   logic [31:0] wb_pc_q, wb_raw_q, wb_result_q, wb_addr_q, wb_wdata_q;
   logic [4:0]  wb_rd_q;
-  logic        wb_rd_we_q, wb_is_load_q, wb_is_store_q, wb_unsigned_q;
+  logic        wb_rd_we_q, wb_is_load_q, wb_is_store_q, wb_unsigned_q, wb_is_mul_q;
+  logic        wb_noinc_q;                 // retirement not counted in minstret (D-022)
   mem_size_e   wb_size_q;
   logic [3:0]  wb_be_q;
 
@@ -190,14 +216,19 @@ module px_core #(
   // EX stage
   // ===========================================================================
   logic [31:0] fwd_a, fwd_b;
-  logic        fwd_a_hit, fwd_b_hit;
+  logic        fwd_a_q, fwd_b_q;           // forward from WB (registered select)
+  logic        fwd_a_d, fwd_b_d;
 
   // Forward from WB. A load in WB is never forwarded: the load-use stall guarantees that
   // its consumer is still in ID, where register-file write-through supplies the data.
-  assign fwd_a_hit = wb_valid_q && wb_rd_we_q && !wb_is_load_q && (wb_rd_q == ex_dec_q.rs1);
-  assign fwd_b_hit = wb_valid_q && wb_rd_we_q && !wb_is_load_q && (wb_rd_q == ex_dec_q.rs2);
-  assign fwd_a     = fwd_a_hit ? wb_result_q : ex_rs1_q;
-  assign fwd_b     = fwd_b_hit ? wb_result_q : ex_rs2_q;
+  // The select is decided when the instructions advance (ID->EX with EX->WB) and
+  // registered, so no register-number compare sits in front of the EX datapath. After a
+  // cycle in which EX was held the operands have been refreshed (see the ID/EX register)
+  // and WB holds a bubble or a waiting access, which is never forwarded.
+  assign fwd_a_d = ex_to_wb && ex_dec_q.rd_we && !ex_dec_q.is_load && (ex_dec_q.rd == dec.rs1);
+  assign fwd_b_d = ex_to_wb && ex_dec_q.rd_we && !ex_dec_q.is_load && (ex_dec_q.rd == dec.rs2);
+  assign fwd_a   = fwd_a_q ? wb_result_q : ex_rs1_q;
+  assign fwd_b   = fwd_b_q ? wb_result_q : ex_rs2_q;
 
   // Decode fields used inside always_comb blocks, as plain signals (guide § 3.3).
   op_a_sel_e   ex_op_a;
@@ -205,7 +236,7 @@ module px_core #(
   mem_size_e   ex_size;
   logic [31:0] ex_imm;
   logic [2:0]  ex_br_f3;
-  logic        ex_is_load, ex_is_ebreak, ex_is_ecall, ex_is_jalr;
+  logic        ex_is_load, ex_is_ebreak, ex_is_ecall, ex_is_jalr, ex_is_mret;
   assign ex_op_a      = ex_dec_q.op_a;
   assign ex_op_b      = ex_dec_q.op_b;
   assign ex_size      = ex_dec_q.mem_size;
@@ -215,6 +246,7 @@ module px_core #(
   assign ex_is_ebreak = ex_dec_q.is_ebreak;
   assign ex_is_ecall  = ex_dec_q.is_ecall;
   assign ex_is_jalr   = ex_dec_q.is_jalr;
+  assign ex_is_mret   = ex_dec_q.is_mret;
 
   logic [31:0] alu_a, alu_b, alu_res;
   logic        alu_eq, alu_lt, alu_ltu;
@@ -289,7 +321,9 @@ module px_core #(
     ex_cause = 5'd0;
     ex_tval  = 32'd0;
     if (ex_ferr_q) begin
-      ex_cause = EXC_IACCESS; ex_tval = ex_pc_q;
+      // mtval is the address of the faulting part: pc + 2 when only the second word of a
+      // straddling 32-bit instruction faulted.
+      ex_cause = EXC_IACCESS; ex_tval = ex_ferr_hi_q ? ex_pc_q + 32'd2 : ex_pc_q;
     end else if (ex_ill_q) begin
       ex_cause = EXC_ILLEGAL; ex_tval = ex_raw_q;
     end else if (ex_is_ebreak) begin
@@ -314,6 +348,95 @@ module px_core #(
   assign data_wdata_o = store_data;
 
   // ===========================================================================
+  // CSR unit
+  // ===========================================================================
+  // Commit point shared with the data request rule: the instruction in EX is valid, not
+  // held, has no exception and no older instruction is failing in WB.
+  logic        csr_commit, mret_commit, csr_noinc, wb_count;
+  logic [31:0] csr_rdata, csr_operand, ex_result;
+  logic [11:0] id_csr_addr, ex_csr_addr;
+  logic [1:0]  ex_csr_op;
+  assign id_csr_addr = dec.csr_addr;
+  assign ex_csr_addr = ex_dec_q.csr_addr;
+  assign ex_csr_op   = ex_dec_q.csr_op;
+  assign csr_operand = ex_dec_q.csr_use_imm ? ex_imm : fwd_a;
+  assign csr_commit  = ex_to_wb && ex_dec_q.csr_en;
+  assign mret_commit = ex_to_wb && ex_dec_q.is_mret;
+
+  /* verilator lint_off PINCONNECTEMPTY */
+  px_csr #(.MTVEC_RESET(MTVEC_RESET)) u_csr (
+    .clk_i, .rst_ni,
+    .id_addr_i    (id_csr_addr),
+    .id_write_i   (dec.csr_write),
+    .id_illegal_o (id_csr_illegal),
+    .ex_addr_i    (ex_csr_addr),
+    .ex_op_i      (ex_csr_op),
+    .ex_operand_i (csr_operand),
+    .ex_write_i   (ex_dec_q.csr_write),
+    .ex_commit_i  (csr_commit),
+    .ex_rdata_o   (csr_rdata),
+    .ex_noinc_o   (csr_noinc),
+    .retire_i     (wb_count),
+    .trap_i       (trap_valid_o),
+    .trap_irq_i   (1'b0),
+    .trap_cause_i (trap_cause_o),
+    .trap_pc_i    (trap_pc_o),
+    .trap_tval_i  (trap_tval_o),
+    .mret_i       (mret_commit),
+    .mtvec_o      (csr_mtvec),
+    .mepc_o       (csr_mepc),
+    .mstatus_mie_o()
+  );
+  /* verilator lint_on PINCONNECTEMPTY */
+
+  // ===========================================================================
+  // Multiplier and divider (D-023)
+  // ===========================================================================
+  logic [1:0]  ex_md_op;
+  logic [31:0] mul_result, div_result;
+  logic        div_valid, div_accept;
+  /* verilator lint_off UNUSEDSIGNAL */
+  logic        div_busy;                   // observed by the testbench
+  /* verilator lint_on UNUSEDSIGNAL */
+  assign ex_md_op  = ex_dec_q.muldiv_op[1:0];
+  assign ex_is_mul = ex_dec_q.muldiv_en && !ex_dec_q.muldiv_op[2];
+  assign ex_is_div = ex_dec_q.muldiv_en &&  ex_dec_q.muldiv_op[2];
+
+  // Stage 1 is loaded when the multiply moves to WB; stage 2 feeds the WB write mux.
+  px_mul u_mul (
+    .clk_i, .rst_ni,
+    .en_i    (ex_to_wb && ex_is_mul),
+    .op_i    (ex_md_op),
+    .a_i     (fwd_a),
+    .b_i     (fwd_b),
+    .result_o(mul_result)
+  );
+
+  // The divider runs while its instruction is valid in EX without an exception, and is
+  // killed by an EX flush (older WB bus error). Phase 2: interrupt entry is a second kill
+  // source. The instruction leaves EX (accept) in the cycle the result is done.
+  assign div_valid  = ex_valid_q && ex_is_div && !ex_exc;
+  assign div_accept = ex_to_wb && ex_is_div;
+  assign div_wait   = div_valid && !div_done;
+
+  px_div u_div (
+    .clk_i, .rst_ni,
+    .valid_i (div_valid),
+    .kill_i  (wb_bus_err),
+    .accept_i(div_accept),
+    .op_i    (ex_md_op),
+    .a_i     (fwd_a),
+    .b_i     (fwd_b),
+    .done_o  (div_done),
+    .result_o(div_result),
+    .busy_o  (div_busy)
+  );
+
+  // Result written to rd: the CSR's old value for CSR instructions, the quotient or
+  // remainder for divides, else the ALU result (a multiply's result is added in WB).
+  assign ex_result = ex_dec_q.csr_en ? csr_rdata : ex_is_div ? div_result : alu_res;
+
+  // ===========================================================================
   // WB stage
   // ===========================================================================
   logic        wb_is_mem;
@@ -335,10 +458,11 @@ module px_core #(
   assign load_val = (wb_size_q == MEM_B) ? {{24{ld_byte_sign}}, ld_byte} :
                     (wb_size_q == MEM_H) ? {{16{ld_half_sign}}, ld_half} : data_rdata_i;
 
-  assign wb_wdata_rf = wb_is_load_q ? load_val : wb_result_q;
+  assign wb_wdata_rf = wb_is_load_q ? load_val : wb_is_mul_q ? mul_result : wb_result_q;
 
   logic wb_retire;
   assign wb_retire = wb_valid_q && !wb_wait && !wb_bus_err;
+  assign wb_count  = wb_retire && !wb_noinc_q;
   assign rf_we     = wb_retire && wb_rd_we_q;
   assign rf_waddr  = wb_rd_q;
   assign rf_wdata  = wb_wdata_rf;
@@ -346,21 +470,23 @@ module px_core #(
   // ===========================================================================
   // Hazards, redirects, traps
   // ===========================================================================
-  assign ex_hold = wb_wait || (ex_mem_go && !data_gnt_i);
+  assign ex_hold = wb_wait || (ex_mem_go && !data_gnt_i) || div_wait;
   assign id_hold = ex_hold || load_use;
 
   assign ex_trap     = ex_valid_q && ex_exc && !ex_hold && !wb_bus_err;
   assign ex_redirect = ex_valid_q && !ex_hold && !wb_bus_err &&
-                       (ex_exc || br_taken || ex_dec_q.is_jalr || ex_dec_q.is_fence_i);
+                       (ex_exc || br_taken || ex_dec_q.is_jalr || ex_dec_q.is_fence_i ||
+                        ex_dec_q.is_mret);
   assign id_redirect = id_valid_q && !id_hold && !ex_redirect && !wb_bus_err &&
                        dec.is_jal && !id_ferr_q && !id_illegal;
 
   assign if_redirect = wb_bus_err || ex_redirect || id_redirect;
   always_comb begin
-    if (wb_bus_err || ex_trap)       if_redirect_pc = trap_vector_i;
+    if (wb_bus_err || ex_trap)       if_redirect_pc = csr_mtvec;
     else if (ex_redirect) begin
       if (br_taken)                  if_redirect_pc = br_target;
       else if (ex_is_jalr)           if_redirect_pc = jalr_target;
+      else if (ex_is_mret)           if_redirect_pc = csr_mepc;
       else                           if_redirect_pc = fencei_target;
     end else                         if_redirect_pc = jal_target;
   end
@@ -373,8 +499,9 @@ module px_core #(
   // ===========================================================================
   // Pipeline registers
   // ===========================================================================
-  logic ex_to_wb, id_to_ex;
+
   assign ex_to_wb = ex_valid_q && !ex_hold && !ex_exc && !wb_bus_err;
+  logic id_to_ex;
   assign id_to_ex = id_valid_q && !id_hold;
 
   // IF/ID
@@ -382,7 +509,7 @@ module px_core #(
     if (!rst_ni) begin
       id_valid_q <= 1'b0;
       id_pc_q    <= 32'd0; id_instr_q <= 32'd0; id_raw_q <= 32'd0;
-      id_is_c_q  <= 1'b0;  id_ill_c_q <= 1'b0;  id_ferr_q <= 1'b0;
+      id_is_c_q  <= 1'b0;  id_ill_c_q <= 1'b0;  id_ferr_q <= 1'b0;  id_ferr_hi_q <= 1'b0;
     end else if (wb_bus_err || ex_redirect || id_redirect) begin
       id_valid_q <= 1'b0;
     end else if (!id_hold) begin
@@ -393,6 +520,7 @@ module px_core #(
       id_is_c_q  <= if_is_c;
       id_ill_c_q <= if_ill_c;
       id_ferr_q  <= if_ferr;
+      id_ferr_hi_q <= if_ferr_hi;
     end
   end
 
@@ -401,17 +529,22 @@ module px_core #(
     if (!rst_ni) begin
       ex_valid_q <= 1'b0;
       ex_pc_q    <= 32'd0; ex_raw_q <= 32'd0;
-      ex_is_c_q  <= 1'b0;  ex_ferr_q <= 1'b0; ex_ill_q <= 1'b0;
+      ex_is_c_q  <= 1'b0;  ex_ferr_q <= 1'b0; ex_ferr_hi_q <= 1'b0; ex_ill_q <= 1'b0;
       ex_dec_q   <= '0;
       ex_rs1_q   <= 32'd0; ex_rs2_q <= 32'd0;
+      fwd_a_q    <= 1'b0;  fwd_b_q  <= 1'b0;
     end else if (wb_bus_err || ex_redirect) begin
       ex_valid_q <= 1'b0;
+      fwd_a_q    <= 1'b0;  fwd_b_q  <= 1'b0;
     end else if (!ex_hold) begin
+      fwd_a_q    <= fwd_a_d;
+      fwd_b_q    <= fwd_b_d;
       ex_valid_q <= id_to_ex;
       ex_pc_q    <= id_pc_q;
       ex_raw_q   <= id_raw_q;
       ex_is_c_q  <= id_is_c_q;
       ex_ferr_q  <= id_ferr_q;
+      ex_ferr_hi_q <= id_ferr_hi_q;
       ex_ill_q   <= id_illegal;
       ex_dec_q   <= dec;
       ex_rs1_q   <= rf_a;
@@ -421,6 +554,8 @@ module px_core #(
       // being forwarded from may leave WB while this instruction waits.
       ex_rs1_q   <= fwd_a;
       ex_rs2_q   <= fwd_b;
+      fwd_a_q    <= 1'b0;
+      fwd_b_q    <= 1'b0;
     end
   end
 
@@ -430,20 +565,23 @@ module px_core #(
       wb_valid_q    <= 1'b0;
       wb_pc_q       <= 32'd0; wb_raw_q <= 32'd0; wb_result_q <= 32'd0;
       wb_addr_q     <= 32'd0; wb_wdata_q <= 32'd0; wb_be_q <= 4'd0;
-      wb_rd_q       <= 5'd0;  wb_rd_we_q <= 1'b0;
+      wb_rd_q       <= 5'd0;  wb_rd_we_q <= 1'b0;  wb_noinc_q <= 1'b0;
       wb_is_load_q  <= 1'b0;  wb_is_store_q <= 1'b0; wb_unsigned_q <= 1'b0;
+      wb_is_mul_q   <= 1'b0;
       wb_size_q     <= MEM_W;
     end else if (!wb_wait) begin
       wb_valid_q    <= ex_to_wb;
       wb_pc_q       <= ex_pc_q;
       wb_raw_q      <= ex_raw_q;
-      wb_result_q   <= alu_res;
+      wb_result_q   <= ex_result;
       wb_addr_q     <= alu_res;
       wb_wdata_q    <= store_data;
       wb_be_q       <= be;
       wb_rd_q       <= ex_dec_q.rd;
       wb_rd_we_q    <= ex_dec_q.rd_we;
+      wb_noinc_q    <= ex_dec_q.csr_en && csr_noinc;
       wb_is_load_q  <= ex_dec_q.is_load;
+      wb_is_mul_q   <= ex_is_mul;
       wb_is_store_q <= ex_dec_q.is_store;
       wb_unsigned_q <= ex_dec_q.mem_unsigned;
       wb_size_q     <= ex_dec_q.mem_size;

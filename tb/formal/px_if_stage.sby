@@ -1,0 +1,30 @@
+# Formal check of px_if_stage (see tb/formal/px_if_stage_fv.sv for the properties).
+# Run: scripts/formal.sh   (SymbiYosys from OSS CAD Suite; results in sim/formal/)
+# formal-default-tasks: bmc cover
+[tasks]
+bmc
+prove
+cover
+
+[options]
+bmc: mode bmc
+bmc: depth 10
+prove: mode prove
+cover: mode cover
+cover: depth 14
+
+[engines]
+bmc: smtbmc bitwuzla
+prove: abc pdr
+cover: smtbmc bitwuzla
+
+[script]
+plugin -i slang
+read_slang px_pkg.sv px_decompressor.sv px_if_stage.sv px_if_stage_fv.sv --top px_if_stage_fv
+prep -top px_if_stage_fv
+
+[files]
+rtl/pkg/px_pkg.sv
+rtl/core/px_decompressor.sv
+rtl/core/px_if_stage.sv
+tb/formal/px_if_stage_fv.sv

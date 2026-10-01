@@ -2,7 +2,8 @@
  * tval checked by the testbench against the TRAP table, plus precision checks: the
  * trapping instruction and everything after it have no effect.
  *
- * Until the CSR unit exists (step 1.6) the handler resumes at the address in s11. */
+ * Each case arms the handler's recovery address (EXPECT_TRAP): the handler records
+ * mcause/mepc/mtval and resumes there with MRET. */
 #include "px_test.h"
 
 #define FAULT_ADDR 0x30000000           /* unmapped: bus error */

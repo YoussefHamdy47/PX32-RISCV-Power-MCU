@@ -1,7 +1,7 @@
 // px_pkg: shared constants and types for the PX32 core.
 //
 // Opcodes, funct fields and CSR addresses follow the RISC-V Unprivileged ISA
-// (20191213) and Privileged ISA (20211203) specifications.
+// and Privileged ISA specifications, release 20240411 (IMPLEMENTATION_CONTRACTS.md § 1).
 // Implements ARCHITECTURE.md § 3 (encoding constants only).
 
 `timescale 1ns/1ps
@@ -105,6 +105,33 @@ package px_pkg;
   localparam logic [11:0] CSR_MARCHID   = 12'hF12;
   localparam logic [11:0] CSR_MIMPID    = 12'hF13;
   localparam logic [11:0] CSR_MHARTID   = 12'hF14;
+  localparam logic [11:0] CSR_MCONFIGPTR = 12'hF15;
+  // Hardware performance monitor (read-only zero in PX32, D-022): mhpmcounter3..31 at
+  // 0xB03..0xB1F, their high halves at 0xB83..0xB9F, mhpmevent3..31 at 0x323..0x33F.
+  localparam logic [11:0] CSR_MHPMCOUNTER3  = 12'hB03;
+  localparam logic [11:0] CSR_MHPMCOUNTER31 = 12'hB1F;
+  localparam logic [11:0] CSR_MHPMCOUNTER3H = 12'hB83;
+  localparam logic [11:0] CSR_MHPMCOUNTER31H = 12'hB9F;
+  localparam logic [11:0] CSR_MHPMEVENT3    = 12'h323;
+  localparam logic [11:0] CSR_MHPMEVENT31   = 12'h33F;
+  // PMP (read-only zero until step 2.6): pmpcfg0..15 at 0x3A0..0x3AF, pmpaddr0..63 at
+  // 0x3B0..0x3EF (one contiguous range)
+  localparam logic [11:0] CSR_PMPCFG0       = 12'h3A0;
+  localparam logic [11:0] CSR_PMPADDR63     = 12'h3EF;
+
+  // mstatus bit positions (RV32, machine mode only)
+  localparam int MSTATUS_MIE  = 3;
+  localparam int MSTATUS_MPIE = 7;
+
+  // Exception codes (mcause, interrupt bit clear)
+  localparam logic [4:0] EXC_IACCESS = 5'd1;
+  localparam logic [4:0] EXC_ILLEGAL = 5'd2;
+  localparam logic [4:0] EXC_BREAK   = 5'd3;
+  localparam logic [4:0] EXC_LMISAL  = 5'd4;
+  localparam logic [4:0] EXC_LACCESS = 5'd5;
+  localparam logic [4:0] EXC_SMISAL  = 5'd6;
+  localparam logic [4:0] EXC_SACCESS = 5'd7;
+  localparam logic [4:0] EXC_ECALL_M = 5'd11;
 
   // ---------------------------------------------------------------------------
   // ALU operations (px_alu)
