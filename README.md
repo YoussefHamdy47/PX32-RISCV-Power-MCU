@@ -130,9 +130,9 @@ Instructions retire in order, one per cycle at most. Multi-cycle results carry a
 | Hardware-loop back edge | 0 |
 | Floating-point add, multiply, fused multiply-add | 1 throughput, 3 latency |
 | Floating-point divide and square root | 14, fixed |
-| Integer divide and remainder | 17, fixed |
+| Integer divide and remainder | 17, fixed for every operand; the next instruction can use the result without waiting |
 
-A taken branch or jump to a 32-bit instruction that starts at a halfword offset costs one more cycle, because its second half is in the next fetch word. Control code aligns branch targets to 4 bytes to avoid it. The integer timings in the table above are measured cycle-exact in simulation; the floating-point and divide timings are targets for later phases.
+A taken branch or jump to a 32-bit instruction that starts at a halfword offset costs one more cycle, because its second half is in the next fetch word. Control code aligns branch targets to 4 bytes to avoid it. The ALU, load, multiply, branch, jump and integer divide timings are measured cycle-exact in simulation; the multiply-accumulate, hardware-loop and floating-point timings are targets for later phases.
 
 Long operations (integer divide, floating-point divide and square root) are abandoned when a control interrupt arrives and restarted after it returns. Interrupt latency therefore does not grow by the length of whatever instruction happened to be executing.
 
@@ -239,9 +239,12 @@ The project is in Phase 1, the base core. Implemented and verified so far:
 | `px_regfile` | Done | 20,766 checks including write-through, collisions, bank switching and asynchronous reset, 329 of 329 coverage bins hit, 7 of 7 injected faults detected; synthesises to exactly 1,984 flip-flops with no latches; clean Verilator lint |
 | `px_decoder` | Done | RV32I, M, Zicsr and Zifencei in machine mode. 109,939 checks, including 54,957 vectors from a table-driven golden model that is itself cross-checked against the GNU disassembler with no unexplained differences; 89 of 89 coverage bins hit; 13 of 13 injected faults detected; 296 generic cells, no latches; clean Verilator lint |
 | `px_decompressor` | Done | Expands RV32C to 32-bit instructions. Checked exhaustively over all 49,152 compressed encodings (104,328 checks) against a golden model that agrees with the GNU disassembler on every encoding, with the real decoder attached; 14 of 14 injected faults detected; 382 generic cells, no latches; clean Verilator lint |
-| `px_core`, `px_if_stage` | Done | The integrated 4-stage pipeline runs real programs. Eight self-checking assembly programs cover ALU edge values, every forwarding and load-use path, all load/store widths, every branch condition, every compressed instruction, eleven exception cases with precision checks and self-modifying code. Each runs with ideal memories and twice with random bus stalls (24 runs), under protocol, X and deadlock checks. Sixteen cycle-exact timing checks match the timing table; 16 of 16 injected faults detected; 9,230 generic cells, no latches; clean Verilator lint |
-| CSRs and trap entry | Next | CSR instructions, MRET, multiply and divide currently raise an illegal-instruction trap until their steps are complete |
-| Multiply and divide, compliance tests, reference-simulator trace comparison | Planned | |
+| `px_core`, `px_if_stage` | Done, audited | The integrated 4-stage pipeline runs real programs. Thirteen directed assembly programs cover ALU edge values, forwarding and load-use paths, all load/store widths, every branch condition, every compressed instruction, precise exceptions (including fetch faults on straddling instructions), CSR instructions, trap entry and return, counters, multiply and divide, wrong-path accesses to a side-effect device and self-modifying code. Eight seeded random programs add about 27,000 more instructions, including CSR accesses, MRET, multiply and divide. Every retired instruction and every trap is compared with an independent instruction-set reference model, with ideal memories, random and long bus stalls, garbage on idle bus inputs and a reset in the middle of a run (123 runs, about 157,000 retirements). The bus monitor checks the one-outstanding-request rule, request stability and reset behaviour. A formal harness checks the fetch stage (bounded model checking). 24 cycle-exact timing checks match the timing table; 110 of 110 non-equivalent injected faults detected across all core blocks; 20,177 generic cells, no latches; clean Verilator lint |
+| `px_csr`, trap entry and MRET | Done | Machine-mode CSRs (mstatus, misa, mie/mip, mtvec, mepc, mcause, mtval, mscratch, the 64-bit cycle and instructions-retired counters, identification registers) with every field's reset value and write rules checked: 49,232 unit checks, legality of all 4,096 CSR addresses, 40,000 random cycles against an independent model, full functional coverage. In the pipeline: all six CSR instruction forms, read/write suppression by encoding, illegal accesses, precise trap entry and MRET, and CSR writes that never take effect on a wrong, stalled or faulting path. Three new directed programs and CSR/MRET content in the random programs; the reference model now includes CSRs and counters, and every run compares them. 12 exact cycle-counter checks |
+| `px_mul`, `px_div` | Done | The RV32M extension (multiply, divide, remainder). The multiplier has two stages, one instruction per cycle, and a result usable two instructions later. The divider is radix 4 and takes exactly 17 cycles for every operand, including divide by zero and overflow; it is abandoned cleanly when an older instruction faults. Unit tests: 51,054 multiplier checks and 25,375 divider checks, with the latency checked on every operation and a kill at every cycle, full functional coverage. A bounded formal check of the divider covers its latency and kill behaviour for all operand values, and its results for all small operands and for divisors 0, 1, -1, 2 and -2 with any dividend; a full-width result proof did not finish. In the pipeline: every operation on corner operands, forwarding, stalls, cancellation and exact cycle counts. misa now advertises M |
+| riscv-tests (upstream ISA tests) | Done | The upstream riscv-tests suite, pinned to a fixed commit and built with its own unmodified test environment, runs on the RTL core in a dedicated compliance testbench: all 41 applicable base-integer tests, all 8 multiply/divide tests and the compressed-instruction test pass, also with random memory stalls. One test (misaligned data access in hardware) does not apply, because PX32 traps on misaligned accesses by design. The runner fails on missing tests, build errors, timeouts or a stale exclusion |
+| Architectural compliance tests (riscv-arch-test 4.1.0) | In progress | The PX32 test target and configuration are prepared, and the suite's Linux build environment (WSL2 with the Sail reference model) is installed. The 80 required tests for I, M, Zca, Zicsr and Zifencei are being built; no result is claimed yet |
+| Reference-simulator trace comparison, timing table | Planned | |
 
 Generic gate counts come from technology-independent synthesis. They are useful for tracking size, but they are not timing results. Timing at 200 MHz can only be established with a target library or FPGA and static timing analysis.
 
@@ -250,7 +253,7 @@ Generic gate counts come from technology-independent synthesis. They are useful 
 ```
 rtl/
   pkg/        Shared package: opcodes, CSR addresses, ALU operation codes
-  core/       CPU core blocks (ALU, register file, and later decoder, pipeline, CSRs)
+  core/       CPU core blocks (ALU, register file, decoders, pipeline, CSRs)
   mem/        Memories and flash model
   bus/        Crossbar, APB bridge, control peripheral bus
   irq/        Interrupt controller
@@ -278,6 +281,8 @@ Source comments refer to internal design documents (architecture, contracts and 
 | Python | 3.12 | Golden vector generation and the status dashboard (standard library only) |
 | OSS CAD Suite | 2026-09-29 | Yosys with the slang SystemVerilog front end for synthesis checks, and Verilator for lint |
 | RISC-V GCC (xPack `riscv-none-elf`) | 15.2.0 | Test programs and firmware, from the pipeline phase onward |
+| riscv-tests | commit bcffa2b | Upstream ISA tests, run on the RTL core |
+| riscv-arch-test, Sail | 4.1.0, 0.14.1 | Architectural compliance tests; the build step runs on Linux (WSL2 on Windows) |
 
 The scripts run under Bash (Git Bash on Windows, or any Linux or macOS shell). On Windows the Icarus install directory `C:\iverilog\bin` is added to the path automatically. On other systems, put `iverilog` and `vvp` on the path. The synthesis script looks for the OSS CAD Suite in `C:\oss-cad-suite`; set `OSS_CAD_SUITE` to use a different location.
 
@@ -309,6 +314,12 @@ Core test programs live in `sw/tests/core/`. They are assembled with the RISC-V 
 bash scripts/build_core_tests.sh
 ```
 
+To run the upstream riscv-tests on the RTL core (the suite is checked out outside the repository; the runner checks its pinned commit), with a second pass under random bus stalls:
+
+```bash
+python scripts/compliance/run_riscv_tests.py --stress 4660
+```
+
 To regenerate the ALU golden vectors after changing the Python model:
 
 ```bash
@@ -323,10 +334,12 @@ Every block has to pass the same gates before it is considered done:
 2. **Independent reference model.** Results are compared against a model written separately from the RTL. Where practical, a second model in another language (Python) generates golden vectors, so a mistake shared by the RTL and the first model is still caught.
 3. **Directed tests with explicit expected values** for every corner case listed in the module header, alongside constrained-random stimulus.
 4. **Functional coverage.** Coverage bins are written by hand, since Icarus has no covergroups. Any bin that is not hit fails the test.
-5. **Mutation testing.** Realistic bugs are injected into a copy of the RTL to confirm that the testbench detects them.
+5. **Mutation testing.** Realistic bugs are injected into a copy of the RTL to confirm that the testbench detects them (`scripts/mutate.py`, mutants listed in `scripts/mutants.txt`).
 6. **Synthesis and lint.** Generic Yosys synthesis must complete with no latches and a clean structural check, and Verilator lint must pass with `-Wall`.
+7. **Instruction-level reference.** Core programs run on an independent instruction-set model (`scripts/px_iss.py`), and the testbench compares every retirement and trap with its trace.
+8. **Formal checks.** SymbiYosys harnesses in `tb/formal` (`scripts/formal.sh`) check interface and data properties of selected blocks.
 
-At the core level, the plan adds the official RISC-V architectural tests, instruction-by-instruction trace comparison against the Spike reference simulator, and cycle-counting tests for every entry in the timing table. From Phase 5, the firmware runs in closed loop against averaged and switching-level models of the power stage.
+At the core level, the upstream riscv-tests already pass. Still to come in Phase 1: the official RISC-V architectural tests (riscv-arch-test, with the Sail reference model), instruction-by-instruction trace comparison against an external reference simulator, and a closing check of every entry in the timing table. From Phase 5, the firmware runs in closed loop against averaged and switching-level models of the power stage.
 
 ## Coding conventions
 
