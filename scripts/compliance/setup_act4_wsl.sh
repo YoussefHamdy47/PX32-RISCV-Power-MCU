@@ -15,9 +15,9 @@
 #     at the tag agree). Any other version stops the build
 #   riscv-arch-test 4.1.0 (6e8a45123f14cebfb3df151a0e7b849b4389b33b), cloned locally from the
 #     Windows checkout C:\px32-tools\src\riscv-arch-test (LF line endings)
-#   compiler: the Windows xPack riscv-none-elf-gcc 15.2.0-1 through scripts/compliance/
-#     wsl_wingcc.sh (path-translating wrapper); the Linux build of the same version could not
-#     be downloaded over the slow link in that session
+#   compiler: xPack riscv-none-elf-gcc 15.2.0-1, Linux x64 build (the same version as the
+#     Windows toolchain used for every other PX32 build; D-010, D-025), published SHA-256
+#     checked -> ~/px32-tools/xpack-riscv-none-elf-gcc-15.2.0-1
 #
 # Usage (inside Ubuntu):
 #   bash /mnt/c/<path to the repository>/scripts/compliance/setup_act4_wsl.sh
@@ -30,6 +30,8 @@ REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 ARCH_TEST_COMMIT=6e8a45123f14cebfb3df151a0e7b849b4389b33b
 SAIL_VER=0.13.1
 UV_VER=0.11.33
+XPACK_VER=15.2.0-1
+XPACK_SHA256=aaaa8060c914851a3e5ee1ba82cc3d6f80972f90638a05c6e823a37557a33758
 mkdir -p "$T" && cd "$T"
 
 missing=""
@@ -52,10 +54,14 @@ test "$("$T/sail/bin/sail_riscv_sim" --version)" = "$SAIL_VER"
 # uv
 command -v "$HOME/.local/bin/uv" >/dev/null || curl -LsSf "https://astral.sh/uv/$UV_VER/install.sh" | sh
 
-# compiler wrapper
-W="$T/gccwrap"; mkdir -p "$W"
-tr -d '\r' < "$REPO/scripts/compliance/wsl_wingcc.sh" > "$W/wsl_wingcc.sh"; chmod +x "$W/wsl_wingcc.sh"
-for t in gcc as ld ar objcopy objdump nm; do ln -sf wsl_wingcc.sh "$W/riscv-none-elf-$t"; done
+# compiler (Linux build of the pinned xPack version)
+W="$T/xpack-riscv-none-elf-gcc-$XPACK_VER/bin"
+if [ ! -x "$W/riscv-none-elf-gcc" ]; then
+  [ -f xpack.tgz ] || curl -fL --retry 5 -o xpack.tgz "https://github.com/xpack-dev-tools/riscv-none-elf-gcc-xpack/releases/download/v$XPACK_VER/xpack-riscv-none-elf-gcc-$XPACK_VER-linux-x64.tar.gz"
+  echo "$XPACK_SHA256  xpack.tgz" | sha256sum -c -
+  tar -xzf xpack.tgz
+fi
+"$W/riscv-none-elf-gcc" --version | head -1
 
 # suite
 if [ ! -d "$T/riscv-arch-test/.git" ]; then

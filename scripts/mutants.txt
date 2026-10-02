@@ -601,3 +601,14 @@
 + assign trap_tval_o  = wb_bus_err ? {wb_addr_q[31:2], 2'b00} : ex_tval;
 # load/store access-fault mtval loses the byte offset (the bus request is word aligned);
 # survived every bench until t06 cases 14-15 (pre-Phase 2 audit)
+
+[P22] rtl/core/px_csr.sv tb_core
+-       CSR_MTVEC:     ex_wdata_o = {w_base, 2'b00};
++       CSR_MTVEC:     ex_wdata_o = wval;
+# retirement trace reports the unlegalized mtval write (MODE bits); only the CSR-write
+# fields of the retirement comparison see it (step 1.9 preparation, D-025)
+
+[P23] rtl/core/px_core.sv tb_core
+-       wb_csr_we_q   <= ex_dec_q.csr_en && ex_dec_q.csr_write;
++       wb_csr_we_q   <= ex_dec_q.csr_en;
+# CSR reads without a write reported as CSR writes on the retirement interface

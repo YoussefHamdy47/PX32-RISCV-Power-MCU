@@ -95,6 +95,9 @@ module tb_core #(
   logic [3:0]  d_be;
   logic        r_valid;
   logic [31:0] r_pc, r_insn, r_rd_wdata, r_mem_addr, r_mem_rdata, r_mem_wdata;
+  logic        r_csr_we;
+  logic [11:0] r_csr_addr;
+  logic [31:0] r_csr_wdata;
   logic [4:0]  r_rd;
   logic [3:0]  r_rmask, r_wmask;
   logic        t_valid;
@@ -112,6 +115,7 @@ module tb_core #(
     .rvfi_rd_addr_o(r_rd), .rvfi_rd_wdata_o(r_rd_wdata), .rvfi_mem_addr_o(r_mem_addr),
     .rvfi_mem_rmask_o(r_rmask), .rvfi_mem_wmask_o(r_wmask),
     .rvfi_mem_rdata_o(r_mem_rdata), .rvfi_mem_wdata_o(r_mem_wdata),
+    .rvfi_csr_we_o(r_csr_we), .rvfi_csr_addr_o(r_csr_addr), .rvfi_csr_wdata_o(r_csr_wdata),
     .trap_valid_o(t_valid), .trap_cause_o(t_cause), .trap_pc_o(t_pc), .trap_tval_o(t_tval)
   );
 
@@ -332,13 +336,15 @@ module tb_core #(
   // Retirement and trap monitors
   // ---------------------------------------------------------------------------
   task automatic check_ref();
-    logic [31:0] e_pc, e_insn, e_wd, e_ma, e_md, e_care;
-    int          e_rd, n;
+    logic [31:0] e_pc, e_insn, e_wd, e_ma, e_md, e_care, e_cd, e_ccare;
+    logic [11:0] e_ca;
+    int          e_rd, e_cw, n;
     logic [3:0]  e_rm, e_wm;
     logic [31:0] got_md, lm;
     if (ref_fd != 0) begin
-      n = $fscanf(ref_fd, "%h %h %d %h %h %h %h %h %h\n", e_pc, e_insn, e_rd, e_wd, e_ma, e_rm, e_wm, e_md, e_care);
-      if (n != 9)
+      n = $fscanf(ref_fd, "%h %h %d %h %h %h %h %h %h %d %h %h %h\n", e_pc, e_insn, e_rd, e_wd, e_ma,
+                  e_rm, e_wm, e_md, e_care, e_cw, e_ca, e_cd, e_ccare);
+      if (n != 13)
         run_error($sformatf("retired pc %08h beyond the end of the reference trace", r_pc));
       else begin
         ref_checked++;
@@ -352,6 +358,10 @@ module tb_core #(
           run_error($sformatf("retirement %0d differs from reference: pc %08h insn %08h x%0d=%08h mem %08h r%h w%h %08h; expected pc %08h insn %08h x%0d=%08h mem %08h r%h w%h %08h",
                               ref_checked, r_pc, r_insn, r_rd, r_rd_wdata, r_mem_addr, r_rmask, r_wmask, got_md,
                               e_pc, e_insn, e_rd, e_wd, e_ma, e_rm, e_wm, e_md));
+        else if (r_csr_we !== e_cw[0] ||
+                 (e_cw != 0 && (r_csr_addr !== e_ca || (r_csr_wdata & e_ccare) !== (e_cd & e_ccare))))
+          run_error($sformatf("retirement %0d (pc %08h) CSR write differs from reference: we %0d csr %03h = %08h; expected we %0d csr %03h = %08h",
+                              ref_checked, r_pc, r_csr_we, r_csr_addr, r_csr_wdata, e_cw, e_ca, e_cd));
       end
     end
   endtask
@@ -418,6 +428,65 @@ module tb_core #(
           trap_tval_log[n_traps]  = t_tval;
         end
         n_traps++;
+      end
+    end
+  end
+
+  // ---------------------------------------------------------------------------
+  // Exactly-once data accesses (audit D-08): every granted data request leaves the core
+  // exactly once, in order, either as the retirement of that access (same word address,
+  // byte lanes and direction) or as an access-fault trap on its address; nothing else
+  // retires with a memory access. Checked for every instruction of every run. A reset
+  // discards accesses in flight; the end of a run requires none outstanding.
+  // ---------------------------------------------------------------------------
+  localparam int XO_DEPTH = 4;
+  logic [31:0] xo_addr [0:XO_DEPTH-1];
+  logic [3:0]  xo_be   [0:XO_DEPTH-1];
+  logic        xo_we   [0:XO_DEPTH-1];
+  int          xo_n, xo_checked;
+
+  task automatic xo_pop();
+    for (int k = 0; k < XO_DEPTH - 1; k++) begin
+      xo_addr[k] = xo_addr[k + 1]; xo_be[k] = xo_be[k + 1]; xo_we[k] = xo_we[k + 1];
+    end
+    xo_n--;
+    xo_checked++;
+  endtask
+
+  always @(posedge clk) begin
+    if (!rst_n) begin
+      xo_n = 0;
+    end else begin
+      // older events first: a response and the next grant may share a cycle
+      if (r_valid && (r_rmask | r_wmask) != 4'd0) begin
+        if (xo_n == 0)
+          run_error($sformatf("pc %08h retired a memory access that was never granted", r_pc));
+        else begin
+          if (r_mem_addr[31:2] !== xo_addr[0][31:2] || (r_rmask | r_wmask) !== xo_be[0] ||
+              (r_wmask != 4'd0) !== xo_we[0])
+            run_error($sformatf("pc %08h retired access %08h be %h we %0d, oldest granted access was %08h be %h we %0d",
+                                r_pc, r_mem_addr, r_rmask | r_wmask, r_wmask != 4'd0,
+                                xo_addr[0], xo_be[0], xo_we[0]));
+          xo_pop();
+        end
+      end
+      if (t_valid && dut.wb_bus_err) begin
+        if (xo_n == 0)
+          run_error($sformatf("bus-error trap at pc %08h without a granted access", t_pc));
+        else begin
+          if ((t_cause != 5'd5 && t_cause != 5'd7) || (t_cause == 5'd7) !== xo_we[0] ||
+              t_tval[31:2] !== xo_addr[0][31:2])
+            run_error($sformatf("bus-error trap cause %0d tval %08h, oldest granted access was %08h we %0d",
+                                t_cause, t_tval, xo_addr[0], xo_we[0]));
+          xo_pop();
+        end
+      end
+      if (d_req && d_gnt) begin
+        if (xo_n == XO_DEPTH) run_error("more than 4 data accesses in flight");
+        else begin
+          xo_addr[xo_n] = d_addr; xo_be[xo_n] = d_be; xo_we[xo_n] = d_we;
+          xo_n++;
+        end
       end
     end
   end
@@ -513,6 +582,8 @@ module tb_core #(
     if (!tohost_retired && (cycle - last_retire) >= 2000)
       run_error($sformatf("deadlock: nothing retired since cycle %0d", last_retire));
     repeat (5) @(posedge clk);
+    if (xo_n != 0)
+      run_error($sformatf("%0d granted data access(es) never retired or trapped", xo_n));
     if (trace_fd != 0) $fclose(trace_fd);
     trace_fd = 0;
 
@@ -610,7 +681,7 @@ module tb_core #(
       $display("FAIL %s (no programs)", NAME);
       $fatal(1, "no programs");
     end else if (total_errors == 0)
-      $display("PASS %s (%0d program runs, %0d retirements matched the reference model)", NAME, runs, total_ref);
+      $display("PASS %s (%0d program runs, %0d retirements matched the reference model, %0d data accesses checked exactly once)", NAME, runs, total_ref, xo_checked);
     else begin
       $display("FAIL %s (%0d errors over %0d runs)", NAME, total_errors, runs);
       $fatal(1, "tb_core failed");

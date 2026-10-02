@@ -17,7 +17,8 @@
 // Plusargs: +image=<path to .hex, one 32-bit word per line from 0x1000_0000>
 //           +tohost=<hex address>   +name=<test name>   +max_cycles=<n> (default 2,000,000)
 //           +stress=<seed>          random grant delays and 1-3 cycle latency (default: ideal)
-//           +trace=<file>           retirement trace (pc insn rd value) for step 1.9
+//           +trace=<file>           retirement trace for step 1.9: pc insn rd value csr_we
+//                                   csr_addr csr_value (value of the CSR after the write)
 //           +console=<hex address>  byte stores to this address are printed (ACT4
 //                                   RVMODEL_IO_WRITE_STR; failure messages)
 // Run: scripts/compliance/run_riscv_tests.sh (compiles this bench once, runs every test)
@@ -46,6 +47,9 @@ module tb_compliance;
   logic [31:0] r_pc, r_insn, r_rd_wdata, r_mem_addr, r_mem_rdata, r_mem_wdata;
   logic [4:0]  r_rd;
   logic [3:0]  r_rmask, r_wmask;
+  logic        r_csr_we;
+  logic [11:0] r_csr_addr;
+  logic [31:0] r_csr_wdata;
   logic        t_valid;
   logic [4:0]  t_cause;
   logic [31:0] t_pc, t_tval;
@@ -61,6 +65,7 @@ module tb_compliance;
     .rvfi_rd_addr_o(r_rd), .rvfi_rd_wdata_o(r_rd_wdata), .rvfi_mem_addr_o(r_mem_addr),
     .rvfi_mem_rmask_o(r_rmask), .rvfi_mem_wmask_o(r_wmask),
     .rvfi_mem_rdata_o(r_mem_rdata), .rvfi_mem_wdata_o(r_mem_wdata),
+    .rvfi_csr_we_o(r_csr_we), .rvfi_csr_addr_o(r_csr_addr), .rvfi_csr_wdata_o(r_csr_wdata),
     .trap_valid_o(t_valid), .trap_cause_o(t_cause), .trap_pc_o(t_pc), .trap_tval_o(t_tval)
   );
 
@@ -152,7 +157,8 @@ module tb_compliance;
         retired++;
         last_retire = cycle;
         if (trace_fd != 0)
-          $fwrite(trace_fd, "%08h %08h %0d %08h\n", r_pc, r_insn, r_rd, r_rd_wdata);
+          $fwrite(trace_fd, "%08h %08h %0d %08h %0d %03h %08h\n", r_pc, r_insn, r_rd, r_rd_wdata,
+                  r_csr_we, r_csr_addr, r_csr_wdata);
         if (console != 32'd0 && r_wmask != 4'd0 && r_mem_addr == console) begin
           // (Icarus 12 crashes on a string cast of a byte: use $sformatf)
           if (r_mem_wdata[7:0] == 8'h0A) begin

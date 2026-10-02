@@ -1,6 +1,6 @@
 # PX32 ACT4 test configuration (riscv-arch-test 4.1.0).
 name: px32
-compiler_exe: riscv-none-elf-gcc # xPack 15.2.0-1 (Windows build through wsl_wingcc.sh)
+compiler_exe: riscv-none-elf-gcc # xPack 15.2.0-1 (Linux x64 build)
 objdump_exe: riscv-none-elf-objdump
 ref_model_exe: sail_riscv_sim # Sail 0.13.1 (required by the 4.1.0 framework)
 udb_config: px32.yaml

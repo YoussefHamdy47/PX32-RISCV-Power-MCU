@@ -34,9 +34,11 @@ It runs the same ITCM/DTCM images that tb_core loads and writes the reference fi
 tb_core compares every run against:
   <prefix>.trace.ref   one line per retired instruction, up to and including the
                        store to tohost: pc insn rd rd_wdata mem_addr rmask wmask mem_data
-                       care (hex; mem_data is the loaded word for loads, the store data
-                       aligned to its byte lanes for stores; only masked lanes count;
-                       care has a 1 for every bit of rd_wdata/mem_data the model knows)
+                       care csr_we csr_addr csr_wdata csr_care (hex; mem_data is the
+                       loaded word for loads, the store data aligned to its byte lanes for
+                       stores; only masked lanes count; care has a 1 for every bit of
+                       rd_wdata/mem_data the model knows; csr_wdata is the value of the
+                       written CSR after the write, csr_care its known bits)
   <prefix>.traps.ref   first line: trap count; then cause pc tval per trap
 
 Platform model (must match tb/core/tb_core.sv)
@@ -381,6 +383,7 @@ class Machine:
         writes = False
         maddr, rmask, wmask, mdata, mcare = 0, 0, 0, 0, M32
         count = True
+        self.csr_written = None
         if op == "lui":
             wval, writes = imm, True
         elif op == "auipc":
@@ -457,7 +460,12 @@ class Machine:
         if count:
             self.instret = (self.instret + 1) & ((1 << 64) - 1)
         self.pc = nxt
-        return (pc, insn, rd_out, rd_val, maddr, rmask, wmask, mdata, care)
+        cw, caddr, cval, ccare = 0, 0, 0, M32
+        if self.csr_written is not None:
+            cw, caddr, cval = 1, self.csr_written[0], self.csr_written[1]
+            if cval is None:
+                cval, ccare = 0, 0
+        return (pc, insn, rd_out, rd_val, maddr, rmask, wmask, mdata, care, cw, caddr, cval, ccare)
 
     @staticmethod
     def alu(op, a, b, rs1, rs2):
@@ -513,15 +521,26 @@ class Machine:
             else:
                 new = old & ~src & M32
             self.csr_write(addr, new)
+            # value of the CSR after the write, as a read returns it (mcycle: the written
+            # value, unknown if it was computed from mcycle)
+            after = new if addr in (0xB00, 0xB80) else self.csr_read(addr)
+            self.csr_written = (addr, after)
         count = not (write and addr in (0xB02, 0xB82))
         return old, count
 
 
 def load_hex(path):
-    words = [int(w, 16) for w in Path(path).read_text().split()]
+    """$readmemh semantics: one word per token; @<hex word index> moves the address."""
     out = bytearray(SIZE)
-    for k, w in enumerate(words[:SIZE // 4]):
-        out[4 * k:4 * k + 4] = w.to_bytes(4, "little")
+    k = 0
+    for tok in Path(path).read_text().split():
+        if tok.startswith("@"):
+            k = int(tok[1:], 16)
+            continue
+        if k >= SIZE // 4:
+            sys.exit(f"{path}: word {k} beyond the {SIZE}-byte memory")
+        out[4 * k:4 * k + 4] = int(tok, 16).to_bytes(4, "little")
+        k += 1
     return out
 
 
@@ -543,7 +562,7 @@ def main():
             break
     else:
         sys.exit(f"{prefix}: no tohost store within {max_steps} instructions")
-    lines = ["%08x %08x %02d %08x %08x %x %x %08x %08x" % t for t in trace]
+    lines = ["%08x %08x %02d %08x %08x %x %x %08x %08x %d %03x %08x %08x" % t for t in trace]
     Path(prefix + ".trace.ref").write_bytes(("\n".join(lines) + "\n").encode())
     tl = [str(len(traps))] + ["%d %08x %08x" % t for t in traps]
     Path(prefix + ".traps.ref").write_bytes(("\n".join(tl) + "\n").encode())

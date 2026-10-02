@@ -3,7 +3,9 @@
 
 Reads the ELF32 program headers directly (standard library only) and places every
 PT_LOAD segment into the 64 KB ITCM (0x1000_0000) or 64 KB DTCM (0x2000_0000) image.
-Each output file holds 16384 little-endian 32-bit words, one per line.
+Each output file is a sparse $readmemh image of the 16384 little-endian 32-bit words: only
+nonzero words are written, one per line, each run preceded by @<word index> (hex). The
+loader must clear the memory first (tb_core and scripts/px_iss.py do).
 
 Usage: python scripts/elf2hex.py prog.elf out_prefix
        -> out_prefix.itcm.hex, out_prefix.dtcm.hex
@@ -41,7 +43,17 @@ def main():
             sys.exit(f"segment at 0x{p_paddr:08x} is outside ITCM/DTCM")
     for name, img in images.items():
         words = struct.unpack(f"<{SIZE // 4}I", img)
-        Path(f"{prefix}.{name}.hex").write_text("".join(f"{w:08x}\n" for w in words), newline="\n")
+        out, nxt = [], -1
+        for k, w in enumerate(words):
+            if w == 0:
+                continue
+            if k != nxt:
+                out.append(f"@{k:x}")
+            out.append(f"{w:08x}")
+            nxt = k + 1
+        if not out:                              # all zero: one explicit word
+            out = ["@0", "00000000"]
+        Path(f"{prefix}.{name}.hex").write_bytes(("\n".join(out) + "\n").encode())
 
 
 if __name__ == "__main__":

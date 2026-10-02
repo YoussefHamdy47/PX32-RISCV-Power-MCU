@@ -80,6 +80,8 @@ module px_csr #(
   input  logic        ex_write_i,     // decoder csr_write
   input  logic        ex_commit_i,    // the access completes this cycle
   output logic [31:0] ex_rdata_o,
+  output logic [31:0] ex_wdata_o,     // value the CSR holds after this write (legalized;
+                                      // for the retirement trace, meaningful when written)
   output logic        ex_noinc_o,     // this access writes minstret/minstreth
 
   // WB: an instruction retires and counts in minstret
@@ -201,6 +203,23 @@ module px_csr #(
   assign w_epc  = wval[31:1];
   assign w_irq  = wval[31];
   assign w_code = wval[4:0];
+
+  // Value of the written CSR after the write, as a read would return it (WARL legalization
+  // as in the update below; counters take the written value; ignored writes read back the
+  // unchanged constant). Reported on the retirement interface (rvfi_csr_*).
+  always_comb begin
+    case (ex_addr_i)
+      CSR_MSTATUS:   ex_wdata_o = {19'd0, 2'b11, 3'd0, w_mpie, 3'd0, w_mie, 3'd0};
+      CSR_MISA:      ex_wdata_o = 32'h4000_1104;
+      CSR_MTVEC:     ex_wdata_o = {w_base, 2'b00};
+      CSR_MSCRATCH:  ex_wdata_o = wval;
+      CSR_MEPC:      ex_wdata_o = {w_epc, 1'b0};
+      CSR_MCAUSE:    ex_wdata_o = {w_irq, 26'd0, w_code};
+      CSR_MTVAL:     ex_wdata_o = wval;
+      CSR_MCYCLE, CSR_MCYCLEH, CSR_MINSTRET, CSR_MINSTRETH: ex_wdata_o = wval;
+      default:       ex_wdata_o = 32'd0;    // read-only zero registers
+    endcase
+  end
 
   logic [30:0] trap_epc;
   assign trap_epc = trap_pc_i[31:1];

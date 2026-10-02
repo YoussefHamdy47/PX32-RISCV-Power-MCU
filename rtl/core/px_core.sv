@@ -91,6 +91,9 @@ module px_core #(
   output logic [3:0]  rvfi_mem_wmask_o,
   output logic [31:0] rvfi_mem_rdata_o,
   output logic [31:0] rvfi_mem_wdata_o,
+  output logic        rvfi_csr_we_o,      // the retiring instruction wrote a CSR
+  output logic [11:0] rvfi_csr_addr_o,
+  output logic [31:0] rvfi_csr_wdata_o,   // value of that CSR after the write
 
   // Trap report (one pulse per trap; the trapping instruction does not retire)
   output logic        trap_valid_o,
@@ -206,6 +209,9 @@ module px_core #(
   // ===========================================================================
   logic        wb_valid_q;
   logic [31:0] wb_pc_q, wb_raw_q, wb_result_q, wb_addr_q, wb_wdata_q;
+  logic        wb_csr_we_q;
+  logic [11:0] wb_csr_addr_q;
+  logic [31:0] wb_csr_wdata_q;
   logic [4:0]  wb_rd_q;
   logic        wb_rd_we_q, wb_is_load_q, wb_is_store_q, wb_unsigned_q, wb_is_mul_q;
   logic        wb_noinc_q;                 // retirement not counted in minstret (D-022)
@@ -353,7 +359,7 @@ module px_core #(
   // Commit point shared with the data request rule: the instruction in EX is valid, not
   // held, has no exception and no older instruction is failing in WB.
   logic        csr_commit, mret_commit, csr_noinc, wb_count;
-  logic [31:0] csr_rdata, csr_operand, ex_result;
+  logic [31:0] csr_rdata, csr_wdata, csr_operand, ex_result;
   logic [11:0] id_csr_addr, ex_csr_addr;
   logic [1:0]  ex_csr_op;
   assign id_csr_addr = dec.csr_addr;
@@ -375,6 +381,7 @@ module px_core #(
     .ex_write_i   (ex_dec_q.csr_write),
     .ex_commit_i  (csr_commit),
     .ex_rdata_o   (csr_rdata),
+    .ex_wdata_o   (csr_wdata),
     .ex_noinc_o   (csr_noinc),
     .retire_i     (wb_count),
     .trap_i       (trap_valid_o),
@@ -569,6 +576,7 @@ module px_core #(
       wb_is_load_q  <= 1'b0;  wb_is_store_q <= 1'b0; wb_unsigned_q <= 1'b0;
       wb_is_mul_q   <= 1'b0;
       wb_size_q     <= MEM_W;
+      wb_csr_we_q   <= 1'b0; wb_csr_addr_q <= 12'd0; wb_csr_wdata_q <= 32'd0;
     end else if (!wb_wait) begin
       wb_valid_q    <= ex_to_wb;
       wb_pc_q       <= ex_pc_q;
@@ -585,6 +593,9 @@ module px_core #(
       wb_is_store_q <= ex_dec_q.is_store;
       wb_unsigned_q <= ex_dec_q.mem_unsigned;
       wb_size_q     <= ex_dec_q.mem_size;
+      wb_csr_we_q   <= ex_dec_q.csr_en && ex_dec_q.csr_write;
+      wb_csr_addr_q <= ex_csr_addr;
+      wb_csr_wdata_q <= csr_wdata;
     end
   end
 
@@ -601,5 +612,8 @@ module px_core #(
   assign rvfi_mem_wmask_o = wb_is_store_q ? wb_be_q : 4'd0;
   assign rvfi_mem_rdata_o = wb_is_load_q  ? data_rdata_i : 32'd0;
   assign rvfi_mem_wdata_o = wb_is_store_q ? wb_wdata_q : 32'd0;
+  assign rvfi_csr_we_o    = wb_retire && wb_csr_we_q;
+  assign rvfi_csr_addr_o  = wb_csr_we_q ? wb_csr_addr_q : 12'd0;
+  assign rvfi_csr_wdata_o = wb_csr_we_q ? wb_csr_wdata_q : 32'd0;
 
 endmodule
