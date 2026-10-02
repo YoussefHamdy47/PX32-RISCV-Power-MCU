@@ -27,7 +27,22 @@ model (scripts/px_iss.py). They mix
   - MRET to a forward label through a just-written mepc, with a wrong-path shadow
 The assembler compresses every eligible instruction, so 16-/32-bit alignment varies.
 
+Long programs for the step 1.9 comparison with Spike (--long, DECISIONS.md D-026): seeds 9-12,
+2,300 items each (at least 10,000 retirements), written to sw/tests/random_long/rlong_<seed>.S
+and run by tb_core_random_long (against the reference model) and by
+scripts/compliance/run_trace_compare.py (against Spike). They use the same generator with
+the "spike" profile, which leaves out only what Spike cannot model or what D-026 classifies
+as a fixed Spike difference from PX32's D-022 choices:
+  - the side-effect device (Spike has no such device; its addresses are left unmapped)
+  - writes of misa (C2), mie (C3) and the PMP CSRs (C7), reads of marchid (C1) and of the PMP
+    CSRs (C7), accesses to mcountinhibit (C5) and tselect (C6)
+  - mtvec values with MODE bit 0 set (C4: Spike keeps Vectored mode) and mcause values outside
+    the WLRL legal set (C8): the written value is loaded with li first
+Everything else, including traps, mcycle (masked by the comparison, M1) and minstret, is kept.
+The default profile (seeds 1-8) is unchanged: its programs are bit-identical to before.
+
 Usage: python scripts/gen_random_programs.py [count] [first_seed]
+       python scripts/gen_random_programs.py --long
 """
 
 import random
@@ -53,11 +68,18 @@ CSR_UNIMPL = ["0xC00", "0xC01", "0xC02", "0x001", "0x003", "0x320", "0x306", "0x
               "0x7A0", "0x7B0", "0xB01", "0x30A", "0x7C0", "0x800", "0xFFF"]
 
 
+# "spike" profile (--long): differences D-026 classifies, left out of the generated programs
+SPIKE_NO_WRITE = {"misa", "mie", "0x3A0", "0x3EF"}          # C2, C3, C7
+SPIKE_NO_READ = {"marchid", "0x3A0", "0x3EF"}               # C1, C7
+SPIKE_NO_UNIMPL = {"0x320", "0x7A0"}                        # C5 mcountinhibit, C6 tselect
+
+
 class Gen:
-    def __init__(self, seed):
+    def __init__(self, seed, profile="default"):
         self.r = random.Random(seed)
         self.lines = []
         self.label = 0
+        self.spike = profile == "spike"
 
     def new_label(self):
         self.label += 1
@@ -131,6 +153,9 @@ class Gen:
 
     def device(self):
         r = self.r
+        if self.spike:                                # no side-effect device on Spike
+            (self.load if r.random() < 0.5 else self.store)()
+            return
         k = r.random()
         if k < 0.5:
             self.emit(f"lw x{self.rd()}, 0(x25)")
@@ -210,7 +235,7 @@ class Gen:
                 src = f"x{self.reg()}" if f != "rw" or r.random() < 0.7 else "x0"
             self.emit(f"csr{f} x{d}, {c}, {src}")
         else:
-            c = r.choice(CSR_UNIMPL)
+            c = r.choice([x for x in CSR_UNIMPL if x not in SPIKE_NO_UNIMPL] if self.spike else CSR_UNIMPL)
             self.emit(f"csrrs x{self.rd()}, {c}, x0" if r.random() < 0.5 else
                       f"csrrw x0, {c}, x{self.reg()}")
 
@@ -219,7 +244,7 @@ class Gen:
         r = self.r
         k = r.random()
         if k < 0.3:
-            c = r.choice(CSR_READ)
+            c = r.choice([x for x in CSR_READ if x not in SPIKE_NO_READ] if self.spike else CSR_READ)
             if c in ("mcycle", "mcycleh"):
                 d = self.reg()
                 self.emit(f"csrr x{d}, {c}")
@@ -233,7 +258,7 @@ class Gen:
             else:
                 self.emit(f"csrr x{self.rd()}, {c}")
         elif k < 0.75:
-            c = r.choice(CSR_FREE)
+            c = r.choice([x for x in CSR_FREE if x not in SPIKE_NO_WRITE] if self.spike else CSR_FREE)
             f = r.choice(["rw", "rs", "rc", "rwi", "rsi", "rci"])
             d = self.rd()
             if c in ("mcycle", "mcycleh"):
@@ -242,11 +267,17 @@ class Gen:
                 src = str(r.randint(0, 31))
             else:
                 src = f"x{self.reg()}"
+                if self.spike and c == "mcause":      # C8: a WLRL-legal value only
+                    self.emit(f"li {src}, {r.choice([0, 0x80000000]) | r.randint(0, 31)}")
             self.emit(f"csr{f} x{d}, {c}, {src}")
         elif k < 0.9:
             c = r.choice(["mtvec", "mscratch"])       # write, then restore at once
             a = r.choice(POOL)
-            self.emit(f"csrrw x{a}, {c}, x{self.reg()}")
+            v = self.reg()
+            if self.spike and c == "mtvec":           # C4: MODE bit 0 clear (Direct)
+                v = r.choice([x for x in POOL if x != a])
+                self.emit(f"li x{v}, {self.const() & ~1}")
+            self.emit(f"csrrw x{a}, {c}, x{v}")
             self.emit(f"csrrw x{self.rd()}, {c}, x{a}")
         else:
             # csrrs on mstatus with random bits, then read back
@@ -354,9 +385,10 @@ class Gen:
         else:
             self.emit(self.r.choice(["fence", "fence.i", "wfi", "fence rw, rw", "nop", "c.nop"]))
 
-    def program(self, seed, items):
+    def program(self, seed, items, name=None):
         head = [
-            f"/* rand_{seed:04d}: generated by scripts/gen_random_programs.py (seed {seed}).",
+            f"/* {name or f'rand_{seed:04d}'}: generated by scripts/gen_random_programs.py (seed {seed}"
+            + (", profile spike, --long)." if self.spike else ")."),
             " * Checked only against the reference model (no self-checks); do not edit. */",
             '#include "px_test.h"',
             "",
@@ -386,7 +418,19 @@ class Gen:
         return "\n".join(self.lines) + "\n"
 
 
+LONG_SEEDS = range(9, 13)
+LONG_ITEMS = 2300
+
+
 def main():
+    if sys.argv[1:] == ["--long"]:
+        out = Path("sw/tests/random_long")
+        out.mkdir(parents=True, exist_ok=True)
+        for seed in LONG_SEEDS:
+            text = Gen(seed, "spike").program(seed, LONG_ITEMS, f"rlong_{seed:04d}")
+            (out / f"rlong_{seed:04d}.S").write_bytes(text.encode())
+            print(f"wrote {out}/rlong_{seed:04d}.S")
+        return
     count = int(sys.argv[1]) if len(sys.argv) > 1 else 8
     first = int(sys.argv[2]) if len(sys.argv) > 2 else 1
     out = Path("sw/tests/random")

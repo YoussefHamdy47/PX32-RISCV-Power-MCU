@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Build every core test program (sw/tests/core/*.S, then the generated random programs in
-# sw/tests/random/*.S) into ITCM/DTCM images for tb_core, and run the reference model
+# sw/tests/random/*.S and the long ones in sw/tests/random_long/*.S) into ITCM/DTCM images for
+# tb_core, and run the reference model
 # (scripts/px_iss.py) on each image to produce the expected retirement trace and trap list.
 # Outputs go to tb/core/programs/ and are committed, so regression does not need the
 # toolchain. Rebuild after changing a test, crt0/link.ld or the reference model.
@@ -17,7 +18,8 @@ OUT=tb/core/programs
 mkdir -p "$OUT" sim/prog
 : > "$OUT/list.txt"
 : > "$OUT/list_random.txt"
-for src in sw/tests/core/*.S sw/tests/random/*.S; do
+: > "$OUT/list_random_long.txt"
+for src in sw/tests/core/*.S sw/tests/random/*.S sw/tests/random_long/*.S; do
   [ -f "$src" ] || continue
   name="$(basename "$src" .S)"
   "$GCC" -march=rv32imc_zicsr_zifencei -mabi=ilp32 -nostdlib -nostartfiles -mno-relax \
@@ -27,6 +29,7 @@ for src in sw/tests/core/*.S sw/tests/random/*.S; do
   "$PY" scripts/px_iss.py "$OUT/$name"
   case "$src" in
     sw/tests/random/*) echo "$name" >> "$OUT/list_random.txt" ;;
+    sw/tests/random_long/*) echo "$name" >> "$OUT/list_random_long.txt" ;;
     *)                 echo "$name" >> "$OUT/list.txt" ;;
   esac
   echo "built $name"
