@@ -1,0 +1,7 @@
+# riscv-tests that PX32 does not support by design. Format: <group> <test> <reason>.
+# The runner still builds and runs them and reports the outcome; if one passes, the
+# exclusion is stale and the run fails.
+rv32ui ma_data IMPLEMENTATION_CONTRACTS.md section 1: natural-alignment violations on halfword/word data accesses trap (misaligned-load/store exceptions); ma_data requires hardware misaligned access and the p environment has no emulating handler
+rv32mi breakpoint Sdtrig (trigger module) is not implemented before the Phase 7 debug work; tselect/tcontrol/tdata1 accesses raise illegal instruction, and the test's handler only accepts breakpoint causes
+rv32mi zicntr Zicntr (user cycle/time/instret) is not in the PX32 ISA (contract section 1, D-022); the counters are mcycle/minstret. Adding it is a Tier 1 change, and time needs the Phase 4 mtime
+rv32mi pmpaddr the test assumes PMP entries exist ("assumes PMP is available"); PX32 has zero PMP entries (read-only zero pmpcfg/pmpaddr, D-022) until step 2.6

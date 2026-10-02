@@ -1,0 +1,51 @@
+# Formal check of px_div (see tb/formal/px_div_fv.sv for the properties and task scope).
+# Run: scripts/formal.sh   (SymbiYosys from OSS CAD Suite; results in sim/formal/)
+# Not in the default set (time-boxed, inconclusive): "full" (50 min) and "relation" (15 min),
+# both stopped by the solver at step 17 without a result. See px_div_fv.sv and PROGRESS.md.
+# formal-default-tasks: timing small special bounds step cover
+[tasks]
+timing
+small
+special
+full
+bounds
+step
+relation
+cover
+
+[options]
+timing: mode bmc
+timing: depth 22
+small: mode bmc
+small: depth 20
+special: mode bmc
+special: depth 20
+full: mode bmc
+full: depth 20
+bounds: mode bmc
+bounds: depth 18
+step: mode prove
+step: depth 4
+relation: mode bmc
+relation: depth 20
+cover: mode cover
+cover: depth 20
+
+[engines]
+smtbmc bitwuzla
+
+[script]
+plugin -i slang
+timing: read_slang -DTIMING_ONLY px_div.sv px_div_fv.sv --top px_div_fv
+small: read_slang -DSMALL_OPERANDS px_div.sv px_div_fv.sv --top px_div_fv
+special: read_slang -DSPECIAL_DIVISOR px_div.sv px_div_fv.sv --top px_div_fv
+full: read_slang px_div.sv px_div_fv.sv --top px_div_fv
+bounds: read_slang -DTIMING_ONLY -DBOUNDS px_div.sv px_div_fv.sv --top px_div_fv
+step: read_slang -DTIMING_ONLY -DSTEP px_div.sv px_div_fv.sv --top px_div_fv
+relation: read_slang -DTIMING_ONLY -DRELATION px_div.sv px_div_fv.sv --top px_div_fv
+cover: read_slang px_div.sv px_div_fv.sv --top px_div_fv
+prep -top px_div_fv
+
+[files]
+rtl/core/px_div.sv
+tb/formal/px_div_fv.sv

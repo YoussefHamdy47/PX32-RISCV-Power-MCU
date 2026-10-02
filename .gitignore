@@ -12,3 +12,5 @@ sim/
 .vscode/
 showcase/
 node_modules/
+__pycache__/
+*.pyc

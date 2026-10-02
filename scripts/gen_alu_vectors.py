@@ -93,7 +93,7 @@ def main() -> None:
     out = Path(__file__).resolve().parent.parent / "tb" / "unit" / "vectors" / "alu_vectors.hex"
     out.parent.mkdir(parents=True, exist_ok=True)
     lines = [f"{len(vectors):028x}"] + [f"{v:028x}" for v in vectors]
-    out.write_text("\n".join(lines) + "\n")
+    out.write_text("\n".join(lines) + "\n", newline="\n")
     print(f"wrote {len(vectors)} vectors to {out}")
 
 

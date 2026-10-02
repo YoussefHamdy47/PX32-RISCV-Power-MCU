@@ -1,0 +1,13 @@
+t01_alu
+t02_forwarding
+t03_loadstore
+t04_branch_jump
+t05_compressed
+t06_traps
+t07_fence
+t08_timing
+t09_audit
+t10_csr
+t11_trap_mret
+t12_counters
+t13_muldiv

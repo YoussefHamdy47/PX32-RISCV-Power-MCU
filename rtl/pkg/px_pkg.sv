@@ -1,7 +1,7 @@
 // px_pkg: shared constants and types for the PX32 core.
 //
 // Opcodes, funct fields and CSR addresses follow the RISC-V Unprivileged ISA
-// (20191213) and Privileged ISA (20211203) specifications.
+// and Privileged ISA specifications, release 20240411 (IMPLEMENTATION_CONTRACTS.md § 1).
 // Implements ARCHITECTURE.md § 3 (encoding constants only).
 
 `timescale 1ns/1ps
@@ -105,6 +105,33 @@ package px_pkg;
   localparam logic [11:0] CSR_MARCHID   = 12'hF12;
   localparam logic [11:0] CSR_MIMPID    = 12'hF13;
   localparam logic [11:0] CSR_MHARTID   = 12'hF14;
+  localparam logic [11:0] CSR_MCONFIGPTR = 12'hF15;
+  // Hardware performance monitor (read-only zero in PX32, D-022): mhpmcounter3..31 at
+  // 0xB03..0xB1F, their high halves at 0xB83..0xB9F, mhpmevent3..31 at 0x323..0x33F.
+  localparam logic [11:0] CSR_MHPMCOUNTER3  = 12'hB03;
+  localparam logic [11:0] CSR_MHPMCOUNTER31 = 12'hB1F;
+  localparam logic [11:0] CSR_MHPMCOUNTER3H = 12'hB83;
+  localparam logic [11:0] CSR_MHPMCOUNTER31H = 12'hB9F;
+  localparam logic [11:0] CSR_MHPMEVENT3    = 12'h323;
+  localparam logic [11:0] CSR_MHPMEVENT31   = 12'h33F;
+  // PMP (read-only zero until step 2.6): pmpcfg0..15 at 0x3A0..0x3AF, pmpaddr0..63 at
+  // 0x3B0..0x3EF (one contiguous range)
+  localparam logic [11:0] CSR_PMPCFG0       = 12'h3A0;
+  localparam logic [11:0] CSR_PMPADDR63     = 12'h3EF;
+
+  // mstatus bit positions (RV32, machine mode only)
+  localparam int MSTATUS_MIE  = 3;
+  localparam int MSTATUS_MPIE = 7;
+
+  // Exception codes (mcause, interrupt bit clear)
+  localparam logic [4:0] EXC_IACCESS = 5'd1;
+  localparam logic [4:0] EXC_ILLEGAL = 5'd2;
+  localparam logic [4:0] EXC_BREAK   = 5'd3;
+  localparam logic [4:0] EXC_LMISAL  = 5'd4;
+  localparam logic [4:0] EXC_LACCESS = 5'd5;
+  localparam logic [4:0] EXC_SMISAL  = 5'd6;
+  localparam logic [4:0] EXC_SACCESS = 5'd7;
+  localparam logic [4:0] EXC_ECALL_M = 5'd11;
 
   // ---------------------------------------------------------------------------
   // ALU operations (px_alu)
@@ -123,5 +150,79 @@ package px_pkg;
     ALU_OR   = 5'd8,
     ALU_AND  = 5'd9
   } alu_op_e;
+
+  // ---------------------------------------------------------------------------
+  // Decoder output (px_decoder). Every field is defined for every input word:
+  // fields that do not apply to an instruction are 0, and an illegal instruction
+  // has every enable and side-effect field 0 (only rs1/rs2/rd and illegal are set).
+  // The bit layout is mirrored by scripts/gen_decoder_vectors.py; keep them in step.
+  // ---------------------------------------------------------------------------
+  typedef enum logic [1:0] {
+    OPA_RS1  = 2'd0,
+    OPA_PC   = 2'd1,
+    OPA_ZERO = 2'd2
+  } op_a_sel_e;
+
+  typedef enum logic [1:0] {
+    OPB_RS2  = 2'd0,
+    OPB_IMM  = 2'd1,
+    OPB_LINK = 2'd2     // 4, or 2 for an expanded compressed instruction (chosen in EX)
+  } op_b_sel_e;
+
+  typedef enum logic [1:0] {
+    WB_ALU    = 2'd0,
+    WB_MEM    = 2'd1,
+    WB_CSR    = 2'd2,
+    WB_MULDIV = 2'd3
+  } wb_sel_e;
+
+  typedef enum logic [1:0] {
+    MEM_B = 2'd0,
+    MEM_H = 2'd1,
+    MEM_W = 2'd2
+  } mem_size_e;
+
+  typedef enum logic [1:0] {
+    CSR_RW = 2'd0,
+    CSR_RS = 2'd1,
+    CSR_RC = 2'd2
+  } csr_op_e;
+
+  typedef struct packed {
+    logic        illegal;       // encoding not implemented: raise illegal-instruction trap
+    logic [4:0]  rs1;           // raw instruction fields, always passed through
+    logic [4:0]  rs2;
+    logic [4:0]  rd;
+    logic        rs1_used;      // instruction architecturally reads rs1 (for hazards)
+    logic        rs2_used;
+    logic        rd_we;         // writes rd, and rd != x0
+    logic [31:0] imm;           // format-specific immediate, sign-extended; zimm for CSR*I
+    alu_op_e     alu_op;
+    op_a_sel_e   op_a;
+    op_b_sel_e   op_b;
+    wb_sel_e     wb_sel;
+    logic        is_branch;
+    logic [2:0]  branch_f3;     // funct3 of the branch (px_pkg::F3_BEQ ... F3_BGEU)
+    logic        is_jal;
+    logic        is_jalr;
+    logic        is_load;
+    logic        is_store;
+    mem_size_e   mem_size;
+    logic        mem_unsigned;  // LBU / LHU
+    logic        muldiv_en;
+    logic [2:0]  muldiv_op;     // funct3 of the M instruction (F3_MUL ... F3_REMU)
+    logic        csr_en;
+    csr_op_e     csr_op;
+    logic        csr_use_imm;   // CSRRWI / CSRRSI / CSRRCI: operand is zimm (in imm)
+    logic        csr_read;      // false for CSRRW/CSRRWI with rd = x0 (no read side effects)
+    logic        csr_write;     // false for CSRRS/CSRRC(I) with rs1/zimm = 0 (no write)
+    logic [11:0] csr_addr;
+    logic        is_ecall;
+    logic        is_ebreak;
+    logic        is_mret;
+    logic        is_wfi;
+    logic        is_fence;
+    logic        is_fence_i;
+  } decode_t;
 
 endpackage
