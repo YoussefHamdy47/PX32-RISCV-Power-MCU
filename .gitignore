@@ -1,16 +1,35 @@
-# Build and simulation outputs
+# Build, simulation, synthesis and formal outputs: the scripts write all of them under sim/
+# (regression logs, dashboard, synthesis reports and netlists, formal work directories,
+# mutation copies, compliance and trace-comparison runs, ELF builds)
 sim/
 *.vcd
+*.fst
+*.ghw
 *.vvp
+obj_dir/
+# Tool output written outside sim/ when a tool is run by hand
+/px_*/
+*.elf
+*.o
+*.map
+*.log
+
+# Committed on purpose (regression needs no toolchain): golden vectors under tb/unit/vectors
+# and the sparse memory images and reference traces under tb/core/programs.
 
 # Design documents stay local: only README.md is published
 *.md
 !README.md
 
-# Local tooling and experiments
+# Local tooling, editors, operating systems
 .idea/
 .vscode/
 showcase/
 node_modules/
 __pycache__/
 *.pyc
+.venv/
+*.swp
+*~
+.DS_Store
+Thumbs.db

@@ -35,6 +35,7 @@ Usage: python scripts/compliance/run_trace_compare.py [--suites riscv-tests,act4
 import argparse
 import concurrent.futures as cf
 import json
+import os
 import re
 import subprocess
 import sys
@@ -234,9 +235,10 @@ def run_dut(vvp, c, stress):
         out = f"wall-clock limit {rt.WALL_LIMIT} s"
     (c["work"] / f"px32_{tag}.log").write_text(out)
     res = [ln for ln in out.splitlines() if re.match(r"^(PASS|FAIL|TIMEOUT) tb_compliance ", ln)]
-    # a test may legitimately fail on PX32 (e.g. an unsupported feature): the trace is still
-    # compared; only a bench problem (no halt store, X, deadlock, timeout) is an error here
-    halted = bool(res) and (res[0].startswith("PASS") or "tohost" in res[0])
+    # A test may legitimately fail on PX32 (an unsupported feature): its trace is still
+    # compared. Halted means PASS, or FAIL with the test's own value in tohost; a bench
+    # problem (X, deadlock, cycle limit; a TIMEOUT line also mentions tohost) is an error.
+    halted = bool(res) and bool(re.match(r"^(PASS|FAIL) tb_compliance \S+ \((tohost \d|\d+ retired)", res[0]))
     return trace, (res[0] if res else "no result line"), halted
 
 
@@ -255,7 +257,7 @@ def run_spike(cases):
         return
     jobs.write_bytes(("\n".join(lines) + "\n").encode())
     r = sh(WSL + ["bash", wsl_path(ROOT / "scripts/compliance/run_spike_wsl.sh"), wsl_path(jobs)],
-           env={**__import__("os").environ, "MSYS_NO_PATHCONV": "1"})
+           env={**os.environ, "MSYS_NO_PATHCONV": "1"})
     if r.returncode != 0:
         sys.exit("FAIL Spike batch: " + (r.stdout + r.stderr).strip())
 
