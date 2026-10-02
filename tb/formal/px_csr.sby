@@ -1,0 +1,31 @@
+# Formal check of px_csr against a model of DECISIONS.md D-022 (audit D-10; properties and
+# environment in tb/formal/px_csr_fv.sv).
+# Run: scripts/formal.sh   (SymbiYosys from OSS CAD Suite; results in sim/formal/)
+# formal-default-tasks: bmc prove cover
+[tasks]
+bmc
+prove
+cover
+
+[options]
+bmc: mode bmc
+bmc: depth 12
+prove: mode prove
+prove: depth 2
+cover: mode cover
+cover: depth 8
+
+[engines]
+smtbmc bitwuzla
+
+[script]
+plugin -i slang
+bmc: read_slang px_pkg.sv px_csr.sv px_csr_fv.sv --top px_csr_fv
+prove: read_slang -DINDUCTION px_pkg.sv px_csr.sv px_csr_fv.sv --top px_csr_fv
+cover: read_slang px_pkg.sv px_csr.sv px_csr_fv.sv --top px_csr_fv
+prep -top px_csr_fv
+
+[files]
+rtl/pkg/px_pkg.sv
+rtl/core/px_csr.sv
+tb/formal/px_csr_fv.sv
