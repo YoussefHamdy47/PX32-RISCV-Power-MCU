@@ -5,6 +5,10 @@
 //         p environment places code, data and tohost in one region; fence_i executes code
 //         from .data). Same base as the PX32 ITCM; only the size differs from tb_core.
 //   Every other address returns a bus error.
+//   +core_map (step 1.9, programs built for tb_core, e.g. the long random programs): the
+//         tb_core map without its side-effect device instead: ITCM 64 KB at 0x1000_0000
+//         (fetch and data), DTCM 64 KB at 0x2000_0000 (data only; a fetch is a bus error),
+//         everything else a bus error. The DTCM image comes from +dtcm_image.
 //   mtvec resets to 0x1000_0040; the test environment sets it anyway.
 // Test protocol (riscv-tests p environment, and the PX32 ACT4 RVMODEL_HALT macros):
 //   the test stores to the word at +tohost=<hex address>. A stored value of 1 is PASS,
@@ -17,8 +21,17 @@
 // Plusargs: +image=<path to .hex, one 32-bit word per line from 0x1000_0000>
 //           +tohost=<hex address>   +name=<test name>   +max_cycles=<n> (default 2,000,000)
 //           +stress=<seed>          random grant delays and 1-3 cycle latency (default: ideal)
-//           +trace=<file>           retirement trace for step 1.9: pc insn rd value csr_we
-//                                   csr_addr csr_value (value of the CSR after the write)
+//           +trace=<file>           trace for step 1.9, in program order, one line per event:
+//                                   retirement: pc insn rd value csr_we csr_addr csr_value
+//                                     mem_addr rmask wmask wdata
+//                                     (hex; csr_value is the CSR after the write; mem_addr is
+//                                     the byte address, the masks are byte lanes of the
+//                                     word, wdata the store data on its lanes)
+//                                   trap:       "trap" cause epc tval (hex)
+//                                   An older retirement and a younger trap in the same cycle
+//                                   are written in that order (the trap is in EX, the
+//                                   retirement in WB; a WB bus error has no retirement)
+//           +core_map +dtcm_image=<path>   the tb_core memory map (above)
 //           +console=<hex address>  byte stores to this address are printed (ACT4
 //                                   RVMODEL_IO_WRITE_STR; failure messages)
 // Run: scripts/compliance/run_riscv_tests.sh (compiles this bench once, runs every test)
@@ -31,12 +44,16 @@ module tb_compliance;
   localparam int          WORDS     = 262144;          // 1 MB
   localparam logic [31:0] TRAPVEC   = 32'h1000_0040;
   localparam int          QDEPTH    = 8;
+  localparam logic [31:0] DTCM_BASE = 32'h2000_0000;
+  localparam int          CORE_WORDS = 16384;       // tb_core ITCM and DTCM: 64 KB each
 
   logic clk = 1'b0;
   logic rst_n;
   always #5 clk = ~clk;
 
   logic [31:0] mem [0:WORDS-1];
+  logic [31:0] dtcm [0:CORE_WORDS-1];
+  bit          core_map;
 
   logic        i_req, i_gnt, i_rvalid, i_err;
   logic [31:0] i_addr, i_rdata;
@@ -70,7 +87,11 @@ module tb_compliance;
   );
 
   function automatic bit in_mem(input logic [31:0] a);
-    return a >= MEM_BASE && a < MEM_BASE + 4 * WORDS;
+    return a >= MEM_BASE && a < MEM_BASE + 4 * (core_map ? CORE_WORDS : WORDS);
+  endfunction
+
+  function automatic bit in_dtcm(input logic [31:0] a);
+    return core_map && a >= DTCM_BASE && a < DTCM_BASE + 4 * CORE_WORDS;
   endfunction
 
   // ---------------------------------------------------------------------------
@@ -109,12 +130,13 @@ module tb_compliance;
         iq_due[(ih + ic) % QDEPTH] = due; ic++; il = due;
       end
       if (d_req && d_gnt) begin
-        a = d_addr; e = !in_mem(a); w = 32'd0;
+        a = d_addr; e = !in_mem(a) && !in_dtcm(a); w = 32'd0;
         if (!e) begin
-          w = mem[(a - MEM_BASE) >> 2];
+          w = in_dtcm(a) ? dtcm[(a - DTCM_BASE) >> 2] : mem[(a - MEM_BASE) >> 2];
           if (d_we) begin
             for (int b = 0; b < 4; b++) if (d_be[b]) w[8*b +: 8] = d_wdata[8*b +: 8];
-            mem[(a - MEM_BASE) >> 2] = w;
+            if (in_dtcm(a)) dtcm[(a - DTCM_BASE) >> 2] = w;
+            else            mem[(a - MEM_BASE) >> 2] = w;
           end
         end
         due = cycle + lat(); if (due <= dl) due = dl + 1;
@@ -152,13 +174,13 @@ module tb_compliance;
         errors++;
         $display("ERROR cycle %0d: X on a core control output", cycle);
       end
-      if (t_valid) traps++;
       if (r_valid && !done) begin
         retired++;
         last_retire = cycle;
         if (trace_fd != 0)
-          $fwrite(trace_fd, "%08h %08h %0d %08h %0d %03h %08h\n", r_pc, r_insn, r_rd, r_rd_wdata,
-                  r_csr_we, r_csr_addr, r_csr_wdata);
+          $fwrite(trace_fd, "%08h %08h %0d %08h %0d %03h %08h %08h %01h %01h %08h\n", r_pc, r_insn,
+                  r_rd, r_rd_wdata, r_csr_we, r_csr_addr, r_csr_wdata, r_mem_addr, r_rmask,
+                  r_wmask, r_mem_wdata);
         if (console != 32'd0 && r_wmask != 4'd0 && r_mem_addr == console) begin
           // (Icarus 12 crashes on a string cast of a byte: use $sformatf)
           if (r_mem_wdata[7:0] == 8'h0A) begin
@@ -172,6 +194,10 @@ module tb_compliance;
           tohost_val = r_mem_wdata;
         end
       end
+      if (t_valid && !done) begin
+        traps++;
+        if (trace_fd != 0) $fwrite(trace_fd, "trap %0h %08h %08h\n", t_cause, t_pc, t_tval);
+      end
     end
   end
 
@@ -179,7 +205,7 @@ module tb_compliance;
   // Runner
   // ---------------------------------------------------------------------------
   initial begin
-    string image, name, tfile;
+    string image, dimage, name, tfile;
     int    max_cycles, fd;
     rst_n = 1'b0;
     errors = 0; done = 1'b0; retired = 0; last_retire = 0; traps = 0; trace_fd = 0;
@@ -188,6 +214,7 @@ module tb_compliance;
     if (!$value$plusargs("name=%s", name)) name = "unnamed";
     if (!$value$plusargs("max_cycles=%d", max_cycles)) max_cycles = 2000000;
     stress = $value$plusargs("stress=%d", seed);
+    core_map = $test$plusargs("core_map");
     if (!$value$plusargs("image=%s", image)) begin
       $display("FAIL tb_compliance %s (no +image)", name);
       $fatal(1, "no image");
@@ -203,7 +230,21 @@ module tb_compliance;
     end
     $fclose(fd);
     for (int k = 0; k < WORDS; k++) mem[k] = 32'd0;
+    for (int k = 0; k < CORE_WORDS; k++) dtcm[k] = 32'd0;
     $readmemh(image, mem);
+    if (core_map) begin
+      if (!$value$plusargs("dtcm_image=%s", dimage)) begin
+        $display("FAIL tb_compliance %s (+core_map needs +dtcm_image)", name);
+        $fatal(1, "no dtcm image");
+      end
+      fd = $fopen(dimage, "r");
+      if (fd == 0) begin
+        $display("FAIL tb_compliance %s (image %s not found)", name, dimage);
+        $fatal(1, "no dtcm image file");
+      end
+      $fclose(fd);
+      $readmemh(dimage, dtcm);
+    end
     if ($value$plusargs("trace=%s", tfile)) trace_fd = $fopen(tfile, "w");
 
     repeat (3) @(posedge clk);
