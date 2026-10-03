@@ -1,6 +1,6 @@
 /* t14_timing_isa: cycle-exact timing of every RV32IMC instruction form (step 1.10).
  *
- * t08 (and t12/t13) check each row of the ARCHITECTURE.md Â§ 4.1 table with one instruction
+ * t08 (and t12/t13) check each row of the ARCHITECTURE.md § 4.1 table with one instruction
  * form. This program checks the same rows for every other form: all register/immediate ALU
  * instructions, every compressed ALU form, every load and store width including C.LW/C.LWSP/
  * C.SW/C.SWSP, load-use after each load form, all six branch conditions taken and not taken,
@@ -9,7 +9,7 @@
  *
  * Each block is bracketed by timing markers (ideal memories; see t08): the end marker must
  * retire exactly DELTA cycles after the start marker. DELTA counts every instruction between
- * the markers plus the end marker itself, plus the Â§ 4.1 penalties: load-use +1, taken
+ * the markers plus the end marker itself, plus the § 4.1 penalties: load-use +1, taken
  * branch 3, JAL (any form) 2, JALR (any form) 3, MUL dependent successor +1. Every redirect
  * target is word aligned, so the D-020 halfword-offset penalty never applies here. */
 #include "px_test.h"
