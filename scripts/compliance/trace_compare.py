@@ -36,8 +36,11 @@ Masks (the only values not compared exactly; each is counted and reported, D-026
       csrrw(i) write of mcycle(h) is compared exactly.
       A value derived from a masked value (through registers, memory or a CSR) may differ
       too: a register, memory byte or CSR whose two values differ is "tainted", and a
-      difference is accepted only where an operand is tainted. A tainted value reaching a
-      load/store address, a branch/jump (the next pc differs) or a trap is a failure.
+      difference is accepted only where an operand is tainted. The rd of a Zicsr instruction
+      is the old CSR value: only a tainted CSR excuses it, never a tainted rs1. The value
+      after a csrrw(i) is rs1/zimm: only a tainted rs1 excuses it, never a tainted CSR
+      (csrrs/csrrc(i) combine both). A tainted value reaching a load/store address, a
+      branch/jump (the next pc differs) or a trap is a failure.
   M2  mtvec reset value: PX32 resets mtvec to its MTVEC_RESET parameter (0x1000_0040 on
       tb_compliance, D-022); Spike resets it to 0 and has no option to change that. Until
       the first write of mtvec, a read of mtvec must return exactly 0x1000_0040 on PX32 and 0
@@ -369,6 +372,9 @@ def compare(dut, ref, dis=None, context=6):
             return fail(i, j, "instruction bits differ")
         srcs, acc, nbytes, zicsr, csr = operands(r["insn"])
         tainted_src = any(xt[s] for s in srcs if s)
+        # A Zicsr instruction's rd is the old CSR value (independent of rs1), and a csrrw(i)
+        # writes rs1/zimm whatever the CSR held: only csrrs/csrrc(i) combine the old value.
+        csr_rmw = zicsr and (r["insn"] >> 12) & 3 in (2, 3)
         if acc and xt[_base(r["insn"])]:
             return fail(i, j, "a tainted (masked) value reached a memory address")
         load_taint = False
@@ -398,7 +404,7 @@ def compare(dut, ref, dis=None, context=6):
                                           f"px32 {d['val']:08x}, spike {r['val']:08x}")
                     st["M2"] += 1
                     st["notes"].append((i, j, "M2 (mtvec reset value)", d["pc"], dis.get(d["pc"], "")))
-                elif tainted_src or load_taint or (zicsr and csr in ct):
+                elif (zicsr and csr in ct) or (not zicsr and (tainted_src or load_taint)):
                     st["taint"] += 1
                     st["notes"].append((i, j, "taint (rd value)", d["pc"], dis.get(d["pc"], "")))
                 else:
@@ -427,7 +433,10 @@ def compare(dut, ref, dis=None, context=6):
             if dcsr[0] != rcsr[0]:
                 return fail(i, j, f"CSR address: px32 {dcsr[0]:03x}, spike {rcsr[0]:03x}")
             if dcsr[1] != rcsr[1]:
-                if tainted_src or dcsr[0] in ct:
+                if csr_rmw and dcsr[0] in TIMING_CSRS:
+                    st["M1"] += 1
+                    st["notes"].append((i, j, "M1 (mcycle csrrs/csrrc)", d["pc"], dis.get(d["pc"], "")))
+                elif tainted_src or (csr_rmw and dcsr[0] in ct):
                     st["taint"] += 1
                     st["notes"].append((i, j, "taint (CSR value)", d["pc"], dis.get(d["pc"], "")))
                 else:
@@ -582,6 +591,26 @@ def _fixtures():
     pmp_s = ("core   0: exception trap_illegal_instruction, epc 0x10000044\n"
              "core   0:           tval 0x3b029073\n"
              "core   0: 3 0x1000004c (0x00000013)")
+    def r1_skip(n):          # the PMP access, n straight-line instructions, Spike's trap target
+        return ("10000044 3b029073 0 00000000 1 3b0 00000000\n"
+                + "".join(f"{0x10000100 + 4 * k:08x} 00000013 0 00000000 0 000 00000000\n" for k in range(n))
+                + "1000004c 00000013 0 00000000 0 000 00000000\n")
+
+    def r2_skip(n):          # the mcountinhibit trap, n handler retirements, Spike's next pc
+        return ("trap 2 10000034 32001073\n"
+                + "".join(f"{0x10000080 + 4 * k:08x} 00000013 0 00000000 0 000 00000000\n" for k in range(n))
+                + "10000038 00000013 0 00000000 0 000 00000000\n")
+    mcw_s = "core   0: 3 0x1000003c (0xb0029073) c2816_mcycle 0x10000000"     # csrw mcycle, t0
+    mcs_s = "core   0: 3 0x1000003c (0xb002a073) c2816_mcycle 0x10000456"     # csrs mcycle, t0
+    hpm_s = "core   0: 3 0x1000003c (0xb0301073)"                             # csrw mhpmcounter3, zero
+    # dm/sm: the mcycle read differs (x6, then x7, tainted); events are inserted before the halt
+    dm = du.replace("6 00000123", "6 00000456").replace("7 00000246", "7 000008ac")
+    sm = sp
+    halt_d, halt_s = "1000004a 00b2a023", "core   0: 3 0x1000004a"
+    zt_d = "10000048 34031473 8 {} 1 340 00000456\n".format               # csrrw s0, mscratch, t1
+    zt_s = "core   0: 3 0x10000048 (0x34031473) x8  0x10000000 c832_mscratch 0x00000123\n"
+    cwi_d = "1000004c 3402d073 0 00000000 1 340 {}\n".format              # csrwi mscratch, 5
+    cwi_s = "core   0: 3 0x1000004c (0x3402d073) c832_mscratch 0x00000005\n"
     taint_addr_s = sp.replace("(0x006303b3) x7  0x00000246", "(0x006303b3) x5  0x00000246")
     taint_addr_d = du.replace("006303b3 7 00000246", "006303b3 5 00000247").replace(
         "b0002373 6 00000123", "b0002373 6 00000124")
@@ -638,6 +667,45 @@ def _fixtures():
                                  sp.replace("core   0: 3 0x10000040 (0x4501)", pmp_s + "\ncore   0: 3 0x10000040 (0x4501)"), 'R1: px32 does something other'),
         "r1_pmp_no_target": (du.replace("10000040 00004501", pmp_d.replace("1000004c", "1000004e") + "\n10000040 00004501"),
                              sp.replace("core   0: 3 0x10000040 (0x4501)", pmp_s + "\ncore   0: 3 0x10000040 (0x4501)"), 'R1:'),
+        "r1_skip_limit": (du.replace("10000040 00004501", r1_skip(8) + "10000040 00004501"),
+                          sp.replace("core   0: 3 0x10000040 (0x4501)", pmp_s + "\ncore   0: 3 0x10000040 (0x4501)"), True),
+        "r1_skip_over_limit": (du.replace("10000040 00004501", r1_skip(9) + "10000040 00004501"),
+                               sp.replace("core   0: 3 0x10000040 (0x4501)", pmp_s + "\ncore   0: 3 0x10000040 (0x4501)"), 'R1: px32 does not reach'),
+        "r2_skip_limit": (du.replace("10000040 00004501", r2_skip(200) + "10000040 00004501"),
+                          sp.replace("core   0: 3 0x10000040 (0x4501)", r2_s + "\ncore   0: 3 0x10000040 (0x4501)"), True),
+        "r2_skip_over_limit": (du.replace("10000040 00004501", r2_skip(201) + "10000040 00004501"),
+                               sp.replace("core   0: 3 0x10000040 (0x4501)", r2_s + "\ncore   0: 3 0x10000040 (0x4501)"), 'R2: px32 does not return'),
+        # M1: a csrrw(i) of mcycle is compared exactly; csrrs/csrrc(i) of it are masked
+        "m1_csrrw_exact": (du.replace("10000040 00004501", "1000003c b0029073 0 00000000 1 b00 10000000\n10000040 00004501"),
+                           sp.replace("core   0: 3 0x10000040 (0x4501)", mcw_s + "\ncore   0: 3 0x10000040 (0x4501)"), True),
+        "m1_csrrw_wrong": (du.replace("10000040 00004501", "1000003c b0029073 0 00000000 1 b00 10000004\n10000040 00004501"),
+                           sp.replace("core   0: 3 0x10000040 (0x4501)", mcw_s + "\ncore   0: 3 0x10000040 (0x4501)"), 'CSR b00 value'),
+        "m1_csrrs_masked": (du.replace("10000040 00004501", "1000003c b002a073 0 00000000 1 b00 10000123\n10000040 00004501"),
+                            sp.replace("core   0: 3 0x10000040 (0x4501)", mcs_s + "\ncore   0: 3 0x10000040 (0x4501)"), True),
+        # the first mtvec write is compared exactly (M2 covers reads of the reset value only)
+        "mtvec_first_write_wrong": (du.replace("10000040 00004501", "10000038 30529073 0 00000000 1 305 10000080\n10000040 00004501"),
+                                    sp.replace("core   0: 3 0x10000040 (0x4501)", "core   0: 3 0x10000038 (0x30529073) "
+                                               "c773_mtvec 0x10000000\ncore   0: 3 0x10000040 (0x4501)"), 'CSR 305 value'),
+        # a tainted rs1 (x6, from mcycle) taints the CSR written by csrrw, never its rd
+        "zicsr_taint_rs1": (dm.replace(halt_d, zt_d("10000000") + halt_d), sm.replace(halt_s, zt_s + halt_s), True),
+        "zicsr_rd_not_excused": (dm.replace(halt_d, zt_d("10000004") + halt_d), sm.replace(halt_s, zt_s + halt_s), 'x8 value'),
+        # a tainted CSR (mscratch above) does not excuse the value written by csrrwi
+        "csrrwi_tainted_csr": (dm.replace(halt_d, zt_d("10000000") + cwi_d("00000005") + halt_d),
+                               sm.replace(halt_s, zt_s + cwi_s + halt_s), True),
+        "csrrwi_tainted_csr_wrong": (dm.replace(halt_d, zt_d("10000000") + cwi_d("00000007") + halt_d),
+                                     sm.replace(halt_s, zt_s + cwi_s + halt_s), 'CSR 340 value'),
+        # a tainted value deciding a branch differently ends in a pc difference
+        "taint_to_branch": (dm.replace(halt_d, "10000048 00030463 0 00000000 0 000 00000000\n" + halt_d),
+                            sm.replace(halt_s, "core   0: 3 0x10000048 (0x00030463)\n" + halt_s.replace("0x1000004a", "0x10000050")),
+                            'pc differs'),
+        # L2: an ignored write of a read-only-zero hpm counter that Spike does not log
+        "l2_hpm_unlogged": (du.replace("10000040 00004501", "1000003c b0301073 0 00000000 1 b03 00000000\n10000040 00004501"),
+                            sp.replace("core   0: 3 0x10000040 (0x4501)", hpm_s + "\ncore   0: 3 0x10000040 (0x4501)"), True),
+        "l2_hpm_nonzero": (du.replace("10000040 00004501", "1000003c b0301073 0 00000000 1 b03 00000001\n10000040 00004501"),
+                           sp.replace("core   0: 3 0x10000040 (0x4501)", hpm_s + "\ncore   0: 3 0x10000040 (0x4501)"), 'px32 writes CSR b03'),
+        "l2_other_csr": (du.replace("10000040 00004501", "1000003c 34001073 0 00000000 1 340 00000000\n10000040 00004501"),
+                         sp.replace("core   0: 3 0x10000040 (0x4501)", "core   0: 3 0x1000003c (0x34001073)\ncore   0: 3 0x10000040 (0x4501)"),
+                         'px32 writes CSR 340'),
     }
 
 
