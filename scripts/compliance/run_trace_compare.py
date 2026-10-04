@@ -62,7 +62,7 @@ KNOWN = {
     # D-022 choices Spike cannot be configured to follow (probe sections, one difference each)
     "csr_probe_s02": ("C1 marchid", "Spike's marchid is 5 (its registered architecture ID, a constant); "
                       "PX32 reads 0 (D-022)", "x8 value: px32 00000000, spike 00000005"),
-    "csr_probe_s04": ("C2 misa", "Spike's misa is writable (M and C can be cleared); PX32 ignores writes (D-022)",
+    "csr_probe_s04": ("C2 misa", "Spike's misa is writable (M, C and, since Zba+Zbb+Zbs, B can be cleared); PX32 ignores writes (D-022)",
                       "CSR 301 value: px32 40001106, spike 40000100"),
     "csr_probe_s05": ("C3 mie", "Spike implements MSIE/MTIE/MEIE as writable; PX32 has no interrupt source "
                       "before the CLIC, so mie is read-only 0 (D-022)", "CSR 304 value: px32 00000000, spike 00000888"),
