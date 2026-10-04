@@ -104,7 +104,10 @@ module px_alu (
   logic [31:0] sll_res;
   logic [31:0] srl_res;
   logic [31:0] sra_res;
+  // Only one half of each 64-bit shift is the rotate result.
+  /* verilator lint_off UNUSEDSIGNAL */
   logic [63:0] rot_l, rot_r;
+  /* verilator lint_on UNUSEDSIGNAL */
   logic [31:0] rol_res, ror_res;
 
   assign shamt   = b_i[4:0];
@@ -119,7 +122,11 @@ module px_alu (
   // ---------------------------------------------------------------------------
   // Count leading/trailing zeros (shared counter) and population count
   // ---------------------------------------------------------------------------
-  logic [31:0] a_rev, cz_in, cz16, cz8, cz4, cz2, cz1;
+  logic [31:0] a_rev, cz_in, cz16, cz8, cz4, cz2;
+  // Only bit 31 of the last search step is used (it is 0 only for a zero operand).
+  /* verilator lint_off UNUSEDSIGNAL */
+  logic [31:0] cz1;
+  /* verilator lint_on UNUSEDSIGNAL */
   logic        z16, z8, z4, z2, z1;
   logic [5:0]  cz_res;
 
