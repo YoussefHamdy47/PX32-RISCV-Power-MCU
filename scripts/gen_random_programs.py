@@ -41,8 +41,16 @@ as a fixed Spike difference from PX32's D-022 choices:
 Everything else, including traps, mcycle (masked by the comparison, M1) and minstret, is kept.
 The default profile (seeds 1-8) is unchanged: its programs are bit-identical to before.
 
+Long programs with bit manipulation (step 2.1, DECISIONS.md D-028): seeds 13-14, profile
+"spike_b" = the spike profile plus Zba/Zbb/Zbs/Zicond: every one of the 31 instructions on
+random and corner operands, with dependent uses (forwarding into the next ALU operation,
+branch operands from bext/czero/min/max, store data, load and store addresses computed with
+sh1add/sh2add/sh3add from a masked index), chains of bit-manipulation instructions and
+compressed neighbours. Every extra random draw happens only in this profile, so seeds 1-12
+(default and spike profiles) regenerate byte-identical.
+
 Usage: python scripts/gen_random_programs.py [count] [first_seed]
-       python scripts/gen_random_programs.py --long
+       python scripts/gen_random_programs.py --long     (seeds 9-12 spike, 13-14 spike_b)
 """
 
 import random
@@ -73,13 +81,22 @@ SPIKE_NO_WRITE = {"misa", "mie", "0x3A0", "0x3EF"}          # C2, C3, C7
 SPIKE_NO_READ = {"marchid", "0x3A0", "0x3EF"}               # C1, C7
 SPIKE_NO_UNIMPL = {"0x320", "0x7A0"}                        # C5 mcountinhibit, C6 tselect
 
+# "spike_b" profile (seeds 13 and up): Zba/Zbb/Zbs/Zicond, RV32 forms only
+BM_RR = ["sh1add", "sh2add", "sh3add", "andn", "orn", "xnor", "max", "maxu", "min", "minu",
+         "rol", "ror", "bclr", "bext", "binv", "bset", "czero.eqz", "czero.nez"]
+BM_UNARY = ["clz", "ctz", "cpop", "sext.b", "sext.h", "zext.h", "orc.b", "rev8"]
+BM_IMM = ["rori", "bclri", "bexti", "binvi", "bseti"]
+BM_CORNER = [0, 1, -1, 0x7FFFFFFF, -0x80000000, 0x80, 0xFF, 0x8000, 0xFFFF, 0x00FF00FF,
+             0x01000000, 0x10000, 31, 32]
+
 
 class Gen:
     def __init__(self, seed, profile="default"):
         self.r = random.Random(seed)
         self.lines = []
         self.label = 0
-        self.spike = profile == "spike"
+        self.spike = profile in ("spike", "spike_b")
+        self.bitmanip = profile == "spike_b"
 
     def new_label(self):
         self.label += 1
@@ -106,6 +123,9 @@ class Gen:
     # -------------------------------------------------------------- simple items
     def alu(self):
         r = self.r
+        if self.bitmanip and r.random() < 0.4:       # extra draw only in the spike_b profile
+            self.bm_op()
+            return
         k = r.random()
         if k < 0.35:
             op = r.choice(["add", "sub", "sll", "slt", "sltu", "xor", "srl", "sra", "or", "and"])
@@ -122,6 +142,69 @@ class Gen:
             self.emit(f"{r.choice(['lui', 'auipc'])} x{self.rd()}, {r.randint(0, 0xFFFFF)}")
         else:
             self.emit(f"li x{self.rd()}, {self.const()}")
+
+    # -------------------------------------------------------------- bit manipulation
+    def bm_op(self, d=None, a=None):
+        """One Zba/Zbb/Zbs/Zicond instruction on random registers (spike_b profile)."""
+        r = self.r
+        d = self.rd() if d is None else d
+        a = self.reg() if a is None else a
+        k = r.random()
+        if k < 0.5:
+            self.emit(f"{r.choice(BM_RR)} x{d}, x{a}, x{self.reg()}")
+        elif k < 0.75:
+            self.emit(f"{r.choice(BM_UNARY)} x{d}, x{a}")
+        else:
+            self.emit(f"{r.choice(BM_IMM)} x{d}, x{a}, {r.choice([0, 1, 7, 8, 15, 16, 31, r.randint(0, 31)])}")
+        return d
+
+    def bm_item(self):
+        """A bit-manipulation instruction with corner operands and a dependent use."""
+        r = self.r
+        if r.random() < 0.4:
+            self.emit(f"li x{self.reg()}, {r.choice(BM_CORNER)}")
+        k = r.random()
+        if k < 0.2:                                   # chain: each result feeds the next
+            d = self.bm_op(d=self.reg())
+            for _ in range(r.randint(1, 3)):
+                d = self.bm_op(d=self.reg(), a=d)
+        elif k < 0.35:                                # result as a branch operand
+            d = self.reg()
+            op = r.choice(["bext", "bexti", "czero.eqz", "czero.nez", "min", "maxu", "cpop", "clz"])
+            if op == "bexti":
+                self.emit(f"bexti x{d}, x{self.reg()}, {r.randint(0, 31)}")
+            elif op in ("cpop", "clz"):
+                self.emit(f"{op} x{d}, x{self.reg()}")
+            else:
+                self.emit(f"{op} x{d}, x{self.reg()}, x{self.reg()}")
+            end = self.new_label()
+            self.emit(f"{r.choice(['beqz', 'bnez'])} x{d}, {end}" if r.random() < 0.5 else
+                      f"{r.choice(['beq', 'bne', 'blt', 'bgeu'])} x{d}, x{self.reg()}, {end}")
+            for _ in range(r.randint(1, 3)):
+                self.shadow_item()
+            self.lines.append(f"{end}:")
+        elif k < 0.5:                                 # result as store data
+            d = self.bm_op(d=self.reg())
+            op, size = r.choice([("sb", 1), ("sh", 2), ("sw", 4)])
+            self.emit(f"{op} x{d}, {self.mem_off(size)}(x26)")
+        elif k < 0.75:                                # shNadd address from a masked index
+            n = r.choice([1, 2, 3])
+            i, p = self.reg(), self.reg()
+            self.emit(f"andi x{i}, x{self.reg()}, {(0x1FF, 0xFF, 0x7F)[n - 1]}")
+            self.emit(f"sh{n}add x{p}, x{i}, sp")
+            size = {1: 2, 2: 4, 3: 4}[n]
+            ld = {2: r.choice(["lh", "lhu"]), 4: "lw"}[size]
+            st = {2: "sh", 4: "sw"}[size]
+            if r.random() < 0.08:                     # misaligned: traps (handler resumes)
+                self.emit(f"addi x{p}, x{p}, 1")
+            if r.random() < 0.5:
+                self.emit(f"{ld} x{self.rd()}, 0(x{p})")
+            else:
+                self.emit(f"{st} x{self.reg()}, 0(x{p})")
+        else:                                         # result forwarded into a base ALU op
+            d = self.bm_op(d=self.reg())
+            op = r.choice(["add", "sub", "xor", "and", "sltu", "sll"])
+            self.emit(f"{op} x{self.rd()}, x{d}, x{self.reg()}")
 
     def mem_off(self, size):
         return self.r.randrange(-2048, 2048 - 4, size)
@@ -357,6 +440,9 @@ class Gen:
         self.trap_instr()
 
     def item(self):
+        if self.bitmanip and self.r.random() < 0.15:  # extra draw only in the spike_b profile
+            self.bm_item()
+            return
         k = self.r.random()
         if k < 0.07:
             self.muldiv()
@@ -388,7 +474,8 @@ class Gen:
     def program(self, seed, items, name=None):
         head = [
             f"/* {name or f'rand_{seed:04d}'}: generated by scripts/gen_random_programs.py (seed {seed}"
-            + (", profile spike, --long)." if self.spike else ")."),
+            + (", profile spike_b, --long)." if self.bitmanip else
+               ", profile spike, --long)." if self.spike else ")."),
             " * Checked only against the reference model (no self-checks); do not edit. */",
             '#include "px_test.h"',
             "",
@@ -420,14 +507,15 @@ class Gen:
 
 LONG_SEEDS = range(9, 13)
 LONG_ITEMS = 2300
+BM_SEEDS = range(13, 15)          # profile spike_b (step 2.1)
 
 
 def main():
     if sys.argv[1:] == ["--long"]:
         out = Path("sw/tests/random_long")
         out.mkdir(parents=True, exist_ok=True)
-        for seed in LONG_SEEDS:
-            text = Gen(seed, "spike").program(seed, LONG_ITEMS, f"rlong_{seed:04d}")
+        for seed in list(LONG_SEEDS) + list(BM_SEEDS):
+            text = Gen(seed, "spike_b" if seed in BM_SEEDS else "spike").program(seed, LONG_ITEMS, f"rlong_{seed:04d}")
             (out / f"rlong_{seed:04d}.S").write_bytes(text.encode())
             print(f"wrote {out}/rlong_{seed:04d}.S")
         return

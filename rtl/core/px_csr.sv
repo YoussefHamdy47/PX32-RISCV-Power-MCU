@@ -7,8 +7,9 @@
 // Implemented CSRs (every other address raises illegal instruction):
 //   mstatus   0x300  MIE (3) and MPIE (7) writable; MPP (12:11) reads 11 (M is the only
 //                    mode); MPRV, TW, SUM, MXR, TVM, TSR, FS, VS, XS, SD read-only 0
-//   misa      0x301  0x4000_1104: MXL = 32, I, M and C (M since step 1.7, D-023);
-//                    writes are ignored (WARL, fixed value)
+//   misa      0x301  px_pkg::MISA_VALUE = 0x4000_1106: MXL = 32, I, M, C and B (M since
+//                    step 1.7, D-023; B since step 2.1, D-028); writes are ignored (WARL,
+//                    fixed value)
 //   mie, mip  0x304, 0x344  read-only 0: no interrupt can become pending before the
 //                    Phase 2 CLIC ("bits of mie that are not writable must be read-only
 //                    zero"); writes are ignored, not illegal
@@ -159,7 +160,7 @@ module px_csr #(
   always_comb begin
     case (ex_addr_i)
       CSR_MSTATUS:   ex_rdata_o = mstatus_val;
-      CSR_MISA:      ex_rdata_o = 32'h4000_1104;
+      CSR_MISA:      ex_rdata_o = MISA_VALUE;
       CSR_MTVEC:     ex_rdata_o = {mtvec_base_q, 2'b00};
       CSR_MSCRATCH:  ex_rdata_o = mscratch_q;
       CSR_MEPC:      ex_rdata_o = {mepc_q, 1'b0};
@@ -210,7 +211,7 @@ module px_csr #(
   always_comb begin
     case (ex_addr_i)
       CSR_MSTATUS:   ex_wdata_o = {19'd0, 2'b11, 3'd0, w_mpie, 3'd0, w_mie, 3'd0};
-      CSR_MISA:      ex_wdata_o = 32'h4000_1104;
+      CSR_MISA:      ex_wdata_o = MISA_VALUE;
       CSR_MTVEC:     ex_wdata_o = {w_base, 2'b00};
       CSR_MSCRATCH:  ex_wdata_o = wval;
       CSR_MEPC:      ex_wdata_o = {w_epc, 1'b0};

@@ -1,17 +1,26 @@
 #!/usr/bin/env python3
-"""px_iss: instruction-set reference model for the tb_core programs (Phase 1 subset).
+"""px_iss: instruction-set reference model for the tb_core programs.
 
 Written from the RISC-V unprivileged/privileged manuals (release 20240411), not from
 the RTL: RV32I, M, C (compressed instructions are executed directly, not expanded),
-Zicsr, Zifencei, machine mode with MRET and precise trap entry. M follows the manual's
+Zicsr, Zifencei, Zba/Zbb/Zbs 1.0.0 and Zicond 1.0 (Phase 2 step 2.1), machine mode with
+MRET and precise trap entry. M follows the manual's
 definitions with Python integers: MULH/MULHSU/MULHU take the upper word of the exact
 signed/unsigned 64-bit product; DIV/REM round towards zero with the remainder taking the
 dividend's sign; division by zero gives quotient -1 (all ones) and remainder = dividend;
 -2^31 / -1 gives quotient -2^31 and remainder 0.
+Bit manipulation, from the instruction descriptions of the manual's "B" chapter (RV32,
+XLEN = 32): shNadd rd = rs2 + (rs1 << N); andn/orn/xnor with the inverted rs2; clz/ctz
+count from the most/least significant end (32 for 0); cpop counts ones; min/max signed
+and unsigned; sext.b/sext.h/zext.h; rol/ror/rori rotate by the low 5 bits; orc.b sets
+each nonzero byte to 0xFF; rev8 reverses the bytes; bclr/bext/binv/bset (and their
+immediate forms) act on bit (rs2 or shamt) mod 32. Zicond: czero.eqz rd = 0 if rs2 == 0
+else rs1; czero.nez rd = 0 if rs2 != 0 else rs1. The RV64-only forms (.w, .uw, shamt[5]
+set, the RV64 rev8 encoding) are illegal.
 
 CSRs (the PX32 choices of DECISIONS.md D-022, modelled here from the manual's field
 definitions): mstatus (MIE, MPIE writable; MPP reads M; everything else 0), misa
-(RV32 I+C, writes ignored), mie/mip/mstatush (read-only 0), mtvec (Direct mode only,
+(RV32 I, M, C and B, writes ignored), mie/mip/mstatush (read-only 0), mtvec (Direct mode only,
 BASE writable), mscratch, mepc (bit 0 zero), mcause (interrupt bit and code [4:0]),
 mtval, mcycle(h)/minstret(h), mhpmcounter3-31(h) and mhpmevent3-31 (read-only 0),
 mvendorid/marchid/mimpid/mhartid/mconfigptr (read-only 0), pmpcfg0-15/pmpaddr0-63
@@ -78,7 +87,66 @@ CSR_RW_ADDRS = {0x300, 0x301, 0x304, 0x305, 0x310, 0x340, 0x341, 0x342, 0x343, 0
 CSR_RW_ADDRS |= set(range(0xB03, 0xB20)) | set(range(0xB83, 0xBA0)) | set(range(0x323, 0x340))
 CSR_RW_ADDRS |= set(range(0x3A0, 0x3F0))         # pmpcfg0-15, pmpaddr0-63: zero PMP entries
 CSR_RO_ADDRS = {0xF11, 0xF12, 0xF13, 0xF14, 0xF15}
-MISA = (1 << 30) | (1 << 12) | (1 << 8) | (1 << 2)   # MXL = 32, I, M, C
+# MXL = 32, I, M, C and B (privileged manual: B = Zba, Zbb and Zbs all implemented)
+MISA = (1 << 30) | (1 << 12) | (1 << 8) | (1 << 2) | (1 << 1)
+
+
+BITMANIP = ("sh1add", "sh2add", "sh3add", "andn", "orn", "xnor", "clz", "ctz", "cpop",
+            "max", "maxu", "min", "minu", "sext.b", "sext.h", "zext.h", "rol", "ror",
+            "orc.b", "rev8", "bclr", "bext", "binv", "bset", "czero.eqz", "czero.nez")
+ALU_OPS = ("add", "sub", "sll", "srl", "sra", "slt", "sltu", "xor", "or", "and",
+           "mul", "mulh", "mulhsu", "mulhu", "div", "divu", "rem", "remu") + BITMANIP
+
+
+def bitmanip(op, a, b):
+    """Zba/Zbb/Zbs/Zicond on known 32-bit operands a (rs1) and b (rs2 or immediate)."""
+    s = b & 31                                     # shift amount / bit index (RV32)
+    if op in ("sh1add", "sh2add", "sh3add"):
+        return (b + (a << int(op[2]))) & M32
+    if op == "andn":
+        return a & ~b & M32
+    if op == "orn":
+        return (a | ~b) & M32
+    if op == "xnor":
+        return ~(a ^ b) & M32
+    if op == "clz":
+        return next((31 - k for k in range(31, -1, -1) if a >> k & 1), 32)
+    if op == "ctz":
+        return next((k for k in range(32) if a >> k & 1), 32)
+    if op == "cpop":
+        return bin(a).count("1")
+    if op in ("max", "min"):
+        sa, sb = sext(a, 32), sext(b, 32)
+        return (max if op == "max" else min)(sa, sb) & M32
+    if op in ("maxu", "minu"):
+        return (max if op == "maxu" else min)(a, b)
+    if op == "sext.b":
+        return sext(a, 8) & M32
+    if op == "sext.h":
+        return sext(a, 16) & M32
+    if op == "zext.h":
+        return a & 0xFFFF
+    if op == "rol":
+        return ((a << s) | (a >> (32 - s))) & M32
+    if op == "ror":
+        return ((a >> s) | (a << (32 - s))) & M32
+    if op == "orc.b":
+        return sum((0xFF << (8 * k)) for k in range(4) if (a >> (8 * k)) & 0xFF)
+    if op == "rev8":
+        return int.from_bytes(a.to_bytes(4, "little"), "big")
+    if op == "bclr":
+        return a & ~(1 << s) & M32
+    if op == "bext":
+        return (a >> s) & 1
+    if op == "binv":
+        return a ^ (1 << s)
+    if op == "bset":
+        return a | (1 << s)
+    if op == "czero.eqz":
+        return 0 if b == 0 else a
+    if op == "czero.nez":
+        return 0 if b != 0 else a
+    raise AssertionError(op)
 
 
 class Trap(Exception):
@@ -248,24 +316,37 @@ class Machine:
         if opc == 0x23 and f3 in (0, 1, 2):
             return (("sb", "sh", "sw")[f3], 0, rs1, rs2, imm_s)
         if opc == 0x13:
+            imm12 = bit(i, 31, 20)
             if f3 == 1:
-                return ("sll", rd, rs1, -1, rs2) if f7 == 0 else None
+                # shift-immediate forms: imm[11:5] is the funct7, rs2 field = shamt[4:0]
+                op = {0x00: "sll", 0x24: "bclr", 0x34: "binv", 0x14: "bset"}.get(f7)
+                if op:
+                    return (op, rd, rs1, -1, rs2)
+                op = {0x600: "clz", 0x601: "ctz", 0x602: "cpop", 0x604: "sext.b",
+                      0x605: "sext.h"}.get(imm12)
+                return (op, rd, rs1, -1, 0) if op else None
             if f3 == 5:
-                if f7 == 0:
-                    return ("srl", rd, rs1, -1, rs2)
-                if f7 == 0x20:
-                    return ("sra", rd, rs1, -1, rs2)
-                return None
+                op = {0x00: "srl", 0x20: "sra", 0x30: "ror", 0x24: "bext"}.get(f7)
+                if op:
+                    return (op, rd, rs1, -1, rs2)
+                op = {0x287: "orc.b", 0x698: "rev8"}.get(imm12)
+                return (op, rd, rs1, -1, 0) if op else None
             return (("add", "", "slt", "sltu", "xor", "", "or", "and")[f3], rd, rs1, -1, imm_i)
         if opc == 0x33:
             if f7 == 0:
                 return (("add", "sll", "slt", "sltu", "xor", "srl", "or", "and")[f3], rd, rs1, rs2, 0)
-            if f7 == 0x20 and f3 in (0, 5):
-                return (("sub" if f3 == 0 else "sra"), rd, rs1, rs2, 0)
             if f7 == 1:
                 return (("mul", "mulh", "mulhsu", "mulhu", "div", "divu", "rem", "remu")[f3],
                         rd, rs1, rs2, 0)
-            return None
+            if f7 == 0x04 and f3 == 4 and rs2 == 0:
+                return ("zext.h", rd, rs1, -1, 0)
+            op = {(0x20, 0): "sub", (0x20, 5): "sra", (0x20, 7): "andn", (0x20, 6): "orn",
+                  (0x20, 4): "xnor", (0x10, 2): "sh1add", (0x10, 4): "sh2add", (0x10, 6): "sh3add",
+                  (0x05, 4): "min", (0x05, 5): "minu", (0x05, 6): "max", (0x05, 7): "maxu",
+                  (0x30, 1): "rol", (0x30, 5): "ror", (0x24, 1): "bclr", (0x24, 5): "bext",
+                  (0x34, 1): "binv", (0x14, 1): "bset", (0x07, 5): "czero.eqz",
+                  (0x07, 7): "czero.nez"}.get((f7, f3))
+            return (op, rd, rs1, rs2, 0) if op else None
         if opc == 0x0F and f3 in (0, 1):
             return ("nop", 0, 0, 0, 0)       # FENCE (all field values) and FENCE.I
         if opc == 0x73:
@@ -429,8 +510,7 @@ class Machine:
             maddr, wmask, mdata = addr, mask, data
             if not known:
                 mcare = 0
-        elif op in ("add", "sub", "sll", "srl", "sra", "slt", "sltu", "xor", "or", "and",
-                    "mul", "mulh", "mulhsu", "mulhu", "div", "divu", "rem", "remu"):
+        elif op in ALU_OPS:
             writes = True
             wval = self.alu(op, a, b, rs1, rs2)
         elif op == "csr":
@@ -497,6 +577,8 @@ class Machine:
             if b == 0:
                 return M32 if op == "divu" else a
             return a // b if op == "divu" else a % b
+        if op in BITMANIP:
+            return bitmanip(op, a, b)
         return {"add": a + b, "sub": a - b, "sll": a << (b & 31), "srl": a >> (b & 31),
                 "sra": sa >> (b & 31), "slt": int(sa < sb), "sltu": int(a < b),
                 "xor": a ^ b, "or": a | b, "and": a & b}[op]

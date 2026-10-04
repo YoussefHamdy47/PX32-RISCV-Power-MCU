@@ -21,7 +21,7 @@
 //       written (a write attempt to bits 11:10 = 11 is illegal and never retires)
 //   A5  ex_noinc_o exactly for a write attempt to minstret/minstreth
 //   B1  mepc_o[0] = 0, mtvec_o[1:0] = 0, and a read of mepc/mtvec/mcause shows the same
-//   B2  read-only CSRs are constant: misa 0x4000_1104, mimpid MIMPID, the rest 0; mstatus
+//   B2  read-only CSRs are constant: misa 0x4000_1106, mimpid MIMPID, the rest 0; mstatus
 //       reads MPP = 11 and 0 outside MIE, MPIE, MPP
 //   B3  no architectural CSR changes unless a commit with a write, a trap or an MRET
 //       happened in the cycle before (the counters excepted)
@@ -102,7 +102,7 @@ module px_csr_fv (
   function automatic logic [31:0] m_read(input logic [11:0] a);
     case (a)
       12'h300: return {19'd0, 2'b11, 3'd0, m_mpie, 3'd0, m_mie, 3'd0};
-      12'h301: return 32'h4000_1104;
+      12'h301: return 32'h4000_1106;
       12'h305: return m_mtvec;
       12'h340: return m_mscratch;
       12'h341: return m_mepc;
@@ -218,7 +218,7 @@ module px_csr_fv (
       if (ex_addr_i == 12'h305) assert (rdata[1:0] == 2'b00);
       if (ex_addr_i == 12'h342) assert (rdata[30:5] == 26'd0);
       // B2
-      if (ex_addr_i == 12'h301) assert (rdata == 32'h4000_1104);
+      if (ex_addr_i == 12'h301) assert (rdata == 32'h4000_1106);
       if (ex_addr_i == 12'hF13) assert (rdata == IMPID);
       if (ex_addr_i == 12'h304 || ex_addr_i == 12'h344 || ex_addr_i == 12'h310 ||
           (ex_addr_i >= 12'hB03 && ex_addr_i <= 12'hB1F) || (ex_addr_i >= 12'hB83 && ex_addr_i <= 12'hB9F) ||

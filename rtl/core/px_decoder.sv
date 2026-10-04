@@ -1,4 +1,5 @@
-// px_decoder: instruction decoder for the ID stage (Phase 1: RV32I, M, Zicsr, Zifencei).
+// px_decoder: instruction decoder for the ID stage: RV32I, M, Zicsr, Zifencei (Phase 1) and
+// Zba, Zbb, Zbs 1.0.0, Zicond 1.0 (Phase 2 step 2.1, PHASE2_ARCHITECTURE.md § 2.3, D-028).
 //
 // Purely combinational. Input is a 32-bit instruction; compressed instructions are
 // expanded to their 32-bit form in IF before they reach this block.
@@ -12,9 +13,18 @@
 //   - inst[1:0] must be 2'b11 (a 16-bit encoding here means the expander failed)
 //   - LOAD funct3 in {LB, LH, LW, LBU, LHU}; STORE funct3 in {SB, SH, SW}
 //   - BRANCH funct3 not 010/011; JALR funct3 = 000
-//   - OP: funct7 0000000 (all funct3), 0100000 (SUB, SRA only), 0000001 (M, all funct3)
+//   - OP: funct7 0000000 (all funct3), 0100000 (SUB, SRA; ANDN, ORN, XNOR), 0000001 (M, all
+//     funct3), 0010000 (SH1ADD/SH2ADD/SH3ADD: funct3 010/100/110), 0000101 (MIN/MINU/MAX/
+//     MAXU: funct3 100-111), 0110000 (ROL 001, ROR 101), 0100100 (BCLR 001, BEXT 101),
+//     0110100 (BINV 001), 0010100 (BSET 001), 0000111 (CZERO.EQZ 101, CZERO.NEZ 111),
+//     0000100 funct3 100 with rs2 = 0 (ZEXT.H; rs2 != 0 is Zbkb PACK, not implemented)
 //   - OP-IMM shifts: SLLI needs imm[11:5] = 0000000, SRLI/SRAI need 0000000/0100000
-//     (imm[5] set would be a 64-bit shift amount: reserved on RV32)
+//     (imm[5] set would be a 64-bit shift amount: reserved on RV32); likewise RORI
+//     (0110000), BCLRI/BEXTI (0100100), BINVI (0110100) and BSETI (0010100) need imm[5] = 0
+//   - OP-IMM funct3 001 with imm[11:0] = 0x600/0x601/0x602/0x604/0x605: CLZ, CTZ, CPOP,
+//     SEXT.B, SEXT.H; funct3 101 with imm[11:0] = 0x287 (ORC.B) or 0x698 (REV8, the RV32
+//     encoding; 0x6B8 is RV64 REV8). Every other rs2/imm value in these spaces is illegal
+//   - the RV64-only forms (.w, .uw: OP-32 and OP-IMM-32 major opcodes) are illegal
 //   - MISC-MEM: funct3 000 FENCE (all fm/pred/succ/rs1/rd values: unused fields are
 //     ignored for forward compatibility, and pred/succ = 0 forms are HINTs),
 //     funct3 001 FENCE.I (imm/rs1/rd ignored per Zifencei); other funct3 illegal
@@ -49,6 +59,7 @@ module px_decoder (
   logic        f3_hi;
   logic [11:0] csr_addr;
   logic [11:0] sys_imm;
+  logic [11:0] imm12;        // OP-IMM imm[11:0]: selects the unary Zbb operations
 
   assign opcode   = instr_i[6:0];
   assign quadrant = instr_i[1:0];
@@ -61,6 +72,7 @@ module px_decoder (
   assign f3_hi    = instr_i[14];      // funct3[2]: unsigned load, CSR immediate form
   assign csr_addr = instr_i[31:20];
   assign sys_imm  = instr_i[31:20];
+  assign imm12    = instr_i[31:20];
 
   // ---------------------------------------------------------------------------
   // Immediates
@@ -168,30 +180,107 @@ module px_decoder (
       end
 
       OPC_OP_IMM: begin
-        if (f3 == F3_SLL && f7 != F7_BASE) legal = 1'b0;
-        if (f3 == F3_SRL_SRA && f7 != F7_BASE && f7 != F7_ALT) legal = 1'b0;
         d.rd_we    = 1'b1;
         d.rs1_used = 1'b1;
         d.op_b     = OPB_IMM;
         d.imm      = imm_i;
-        d.alu_op   = alu_from_f3(f3, (f3 == F3_SRL_SRA) && (f7 == F7_ALT));
+        if (f3 == F3_SLL) begin
+          // f7 is imm[11:5]; imm[5] = 1 (RV64 shift amount) never matches
+          if (f7 == F7_BASE)      d.alu_op = ALU_SLL;
+          else if (f7 == F7_BCLR) d.alu_op = ALU_BCLR;      // bclri
+          else if (f7 == F7_BINV) d.alu_op = ALU_BINV;      // binvi
+          else if (f7 == F7_BSET) d.alu_op = ALU_BSET;      // bseti
+          else if (imm12 == IMM_CLZ)   d.alu_op = ALU_CLZ;
+          else if (imm12 == IMM_CTZ)   d.alu_op = ALU_CTZ;
+          else if (imm12 == IMM_CPOP)  d.alu_op = ALU_CPOP;
+          else if (imm12 == IMM_SEXTB) d.alu_op = ALU_SEXTB;
+          else if (imm12 == IMM_SEXTH) d.alu_op = ALU_SEXTH;
+          else                    legal = 1'b0;
+        end else if (f3 == F3_SRL_SRA) begin
+          if (f7 == F7_BASE)      d.alu_op = ALU_SRL;
+          else if (f7 == F7_ALT)  d.alu_op = ALU_SRA;
+          else if (f7 == F7_ROT)  d.alu_op = ALU_ROR;       // rori
+          else if (f7 == F7_BCLR) d.alu_op = ALU_BEXT;      // bexti
+          else if (imm12 == IMM_ORCB) d.alu_op = ALU_ORCB;
+          else if (imm12 == IMM_REV8) d.alu_op = ALU_REV8;
+          else                    legal = 1'b0;
+        end else begin
+          d.alu_op = alu_from_f3(f3, 1'b0);
+        end
       end
 
       OPC_OP: begin
         d.rd_we    = 1'b1;
         d.rs1_used = 1'b1;
         d.rs2_used = 1'b1;
-        if (f7 == F7_MULDIV) begin
-          d.muldiv_en = 1'b1;
-          d.muldiv_op = f3;
-          d.wb_sel    = WB_MULDIV;
-        end else if (f7 == F7_BASE) begin
-          d.alu_op = alu_from_f3(f3, 1'b0);
-        end else if (f7 == F7_ALT && (f3 == F3_ADD_SUB || f3 == F3_SRL_SRA)) begin
-          d.alu_op = alu_from_f3(f3, 1'b1);
-        end else begin
-          legal = 1'b0;
-        end
+        case (f7)
+          F7_MULDIV: begin
+            d.muldiv_en = 1'b1;
+            d.muldiv_op = f3;
+            d.wb_sel    = WB_MULDIV;
+          end
+          F7_BASE: d.alu_op = alu_from_f3(f3, 1'b0);
+          F7_ALT: begin
+            case (f3)
+              F3_ADD_SUB: d.alu_op = ALU_SUB;
+              F3_SRL_SRA: d.alu_op = ALU_SRA;
+              F3_AND:     d.alu_op = ALU_ANDN;
+              F3_OR:      d.alu_op = ALU_ORN;
+              F3_XOR:     d.alu_op = ALU_XNOR;
+              default:    legal = 1'b0;
+            endcase
+          end
+          F7_SHADD: begin
+            case (f3)
+              3'b010:  d.alu_op = ALU_SH1ADD;
+              3'b100:  d.alu_op = ALU_SH2ADD;
+              3'b110:  d.alu_op = ALU_SH3ADD;
+              default: legal = 1'b0;
+            endcase
+          end
+          F7_MINMAX: begin
+            case (f3)
+              3'b100:  d.alu_op = ALU_MIN;
+              3'b101:  d.alu_op = ALU_MINU;
+              3'b110:  d.alu_op = ALU_MAX;
+              3'b111:  d.alu_op = ALU_MAXU;
+              default: legal = 1'b0;
+            endcase
+          end
+          F7_ROT: begin
+            if (f3 == F3_SLL)          d.alu_op = ALU_ROL;
+            else if (f3 == F3_SRL_SRA) d.alu_op = ALU_ROR;
+            else                       legal = 1'b0;
+          end
+          F7_BCLR: begin
+            if (f3 == F3_SLL)          d.alu_op = ALU_BCLR;
+            else if (f3 == F3_SRL_SRA) d.alu_op = ALU_BEXT;
+            else                       legal = 1'b0;
+          end
+          F7_BINV: begin
+            if (f3 == F3_SLL) d.alu_op = ALU_BINV;
+            else              legal = 1'b0;
+          end
+          F7_BSET: begin
+            if (f3 == F3_SLL) d.alu_op = ALU_BSET;
+            else              legal = 1'b0;
+          end
+          F7_CZERO: begin
+            if (f3 == 3'b101)      d.alu_op = ALU_CZERO_EQZ;
+            else if (f3 == 3'b111) d.alu_op = ALU_CZERO_NEZ;
+            else                   legal = 1'b0;
+          end
+          F7_ZEXTH: begin
+            // zext.h is the rs2 = x0 form; it reads rs1 only
+            if (f3 == F3_XOR && rs2 == 5'd0) begin
+              d.alu_op   = ALU_ZEXTH;
+              d.rs2_used = 1'b0;
+            end else begin
+              legal = 1'b0;
+            end
+          end
+          default: legal = 1'b0;
+        endcase
       end
 
       OPC_MISC_MEM: begin

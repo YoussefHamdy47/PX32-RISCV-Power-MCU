@@ -32,7 +32,7 @@ test_main:
 
   /* ---------------- A. fixed registers ---------------- */
   csrr a0, misa
-  CHECK(1, a0, 0x40001104)
+  CHECK(1, a0, 0x40001106)
   csrr a0, mvendorid
   CHECK(2, a0, 0)
   csrr a0, marchid
@@ -172,7 +172,7 @@ t_mtinst:
   csrci mstatus, 8
   csrw misa, x0
   csrr a0, misa
-  CHECK(63, a0, 0x40001104)
+  CHECK(63, a0, 0x40001106)
   csrw mie, a1
   csrr a0, mie
   CHECK(64, a0, 0)

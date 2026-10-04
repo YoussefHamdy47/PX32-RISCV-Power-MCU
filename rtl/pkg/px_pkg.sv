@@ -80,6 +80,23 @@ package px_pkg;
   localparam logic [6:0] F7_BASE   = 7'b0000000;
   localparam logic [6:0] F7_ALT    = 7'b0100000;  // SUB, SRA, SRAI
   localparam logic [6:0] F7_MULDIV = 7'b0000001;
+  // Zba/Zbb/Zbs 1.0.0 and Zicond 1.0 (unprivileged ISA 20240411); F7_ALT is also andn/orn/xnor
+  localparam logic [6:0] F7_ZEXTH   = 7'b0000100;  // zext.h (rs2 = 0)
+  localparam logic [6:0] F7_MINMAX  = 7'b0000101;  // min, minu, max, maxu
+  localparam logic [6:0] F7_CZERO   = 7'b0000111;  // czero.eqz, czero.nez
+  localparam logic [6:0] F7_SHADD   = 7'b0010000;  // sh1add, sh2add, sh3add
+  localparam logic [6:0] F7_BSET    = 7'b0010100;  // bset(i); orc.b (OP-IMM funct3 101)
+  localparam logic [6:0] F7_BCLR    = 7'b0100100;  // bclr(i), bext(i)
+  localparam logic [6:0] F7_ROT     = 7'b0110000;  // rol, ror, rori; clz/ctz/cpop/sext.b/sext.h
+  localparam logic [6:0] F7_BINV    = 7'b0110100;  // binv(i); rev8 (OP-IMM funct3 101)
+  // OP-IMM funct3 001/101 unary Zbb encodings: imm[11:0] (rs2 field selects the operation)
+  localparam logic [11:0] IMM_CLZ   = 12'h600;
+  localparam logic [11:0] IMM_CTZ   = 12'h601;
+  localparam logic [11:0] IMM_CPOP  = 12'h602;
+  localparam logic [11:0] IMM_SEXTB = 12'h604;
+  localparam logic [11:0] IMM_SEXTH = 12'h605;
+  localparam logic [11:0] IMM_ORCB  = 12'h287;
+  localparam logic [11:0] IMM_REV8  = 12'h698;   // RV32 encoding (RV64 rev8 is 0x6B8)
 
   // ---------------------------------------------------------------------------
   // CSR addresses (machine mode subset, ARCHITECTURE.md § 4.3 adds CLIC CSRs later)
@@ -119,6 +136,10 @@ package px_pkg;
   localparam logic [11:0] CSR_PMPCFG0       = 12'h3A0;
   localparam logic [11:0] CSR_PMPADDR63     = 12'h3EF;
 
+  // misa (read-only, D-022; D-028): MXL = 32 (bits 31:30 = 01), extensions I (bit 8),
+  // M (12), C (2) and B (1: Zba, Zbb and Zbs all implemented, privileged ISA 20240411)
+  localparam logic [31:0] MISA_VALUE = 32'h4000_1106;
+
   // mstatus bit positions (RV32, machine mode only)
   localparam int MSTATUS_MIE  = 3;
   localparam int MSTATUS_MPIE = 7;
@@ -134,22 +155,52 @@ package px_pkg;
   localparam logic [4:0] EXC_ECALL_M = 5'd11;
 
   // ---------------------------------------------------------------------------
-  // ALU operations (px_alu)
-  // 5 bits wide so Zba/Zbb/Zbs/Zicond/Xcvalu operations can be added in
-  // Phase 2 without changing port widths.
+  // ALU operations (px_alu): RV32I, Zba, Zbb, Zbs, Zicond (36 operations, 6 bits; D-028).
+  // ADD, SH1ADD, SH2ADD and SH3ADD must stay 0..3: px_alu uses op_i[1:0] as the Zba
+  // pre-shift amount of operand a and selects the adder only when op_i[5:2] == 0.
+  // RORI uses ALU_ROR and the Zbs immediate forms use the register forms (b = immediate).
+  // Codes 36..63 are undefined (result 0); Xcvalu (step 2.5a) adds its operations here.
   // ---------------------------------------------------------------------------
-  typedef enum logic [4:0] {
-    ALU_ADD  = 5'd0,
-    ALU_SUB  = 5'd1,
-    ALU_SLL  = 5'd2,
-    ALU_SLT  = 5'd3,
-    ALU_SLTU = 5'd4,
-    ALU_XOR  = 5'd5,
-    ALU_SRL  = 5'd6,
-    ALU_SRA  = 5'd7,
-    ALU_OR   = 5'd8,
-    ALU_AND  = 5'd9
+  typedef enum logic [5:0] {
+    ALU_ADD       = 6'd0,
+    ALU_SH1ADD    = 6'd1,
+    ALU_SH2ADD    = 6'd2,
+    ALU_SH3ADD    = 6'd3,
+    ALU_SUB       = 6'd4,
+    ALU_SLL       = 6'd5,
+    ALU_SLT       = 6'd6,
+    ALU_SLTU      = 6'd7,
+    ALU_XOR       = 6'd8,
+    ALU_SRL       = 6'd9,
+    ALU_SRA       = 6'd10,
+    ALU_OR        = 6'd11,
+    ALU_AND       = 6'd12,
+    ALU_ANDN      = 6'd13,
+    ALU_ORN       = 6'd14,
+    ALU_XNOR      = 6'd15,
+    ALU_CLZ       = 6'd16,
+    ALU_CTZ       = 6'd17,
+    ALU_CPOP      = 6'd18,
+    ALU_MAX       = 6'd19,
+    ALU_MAXU      = 6'd20,
+    ALU_MIN       = 6'd21,
+    ALU_MINU      = 6'd22,
+    ALU_SEXTB     = 6'd23,
+    ALU_SEXTH     = 6'd24,
+    ALU_ZEXTH     = 6'd25,
+    ALU_ROL       = 6'd26,
+    ALU_ROR       = 6'd27,
+    ALU_ORCB      = 6'd28,
+    ALU_REV8      = 6'd29,
+    ALU_BCLR      = 6'd30,
+    ALU_BEXT      = 6'd31,
+    ALU_BINV      = 6'd32,
+    ALU_BSET      = 6'd33,
+    ALU_CZERO_EQZ = 6'd34,
+    ALU_CZERO_NEZ = 6'd35
   } alu_op_e;
+
+  localparam int ALU_NUM_OPS = 36;
 
   // ---------------------------------------------------------------------------
   // Decoder output (px_decoder). Every field is defined for every input word:

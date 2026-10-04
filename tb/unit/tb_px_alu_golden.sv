@@ -12,7 +12,7 @@ module tb_px_alu_golden;
 
   import px_pkg::*;
 
-  localparam int    MAX_VECTORS = 10000;  // must equal the count written by gen_alu_vectors.py
+  localparam int    MAX_VECTORS = 20000;  // must equal the count written by gen_alu_vectors.py
   localparam string VEC_FILE    = "tb/unit/vectors/alu_vectors.hex";
 
   logic [111:0] mem [0:MAX_VECTORS];
@@ -52,7 +52,7 @@ module tb_px_alu_golden;
     end
 
     for (int n = 1; n <= count; n++) begin
-      op        = alu_op_e'(mem[n][108:104]);
+      op        = alu_op_e'(mem[n][109:104]);
       a         = mem[n][103:72];
       b         = mem[n][71:40];
       exp_res   = mem[n][39:8];

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Golden model and test vectors for px_decoder (Phase 1: RV32I, M, Zicsr, Zifencei).
+"""Golden model and test vectors for px_decoder: RV32I, M, Zicsr, Zifencei and (Phase 2 step
+2.1) Zba, Zbb, Zbs 1.0.0, Zicond 1.0.
 
 The model is written independently of the RTL: each instruction is identified by a
 (mask, match) pair, in the style of the official riscv-opcodes tables, and its control
@@ -10,11 +11,12 @@ Two outputs:
   1. tb/unit/vectors/decoder_vectors.hex: one line per instruction word:
        [143:136] mnemonic id (0 = illegal; names listed in decoder_mnemonics.txt)
        [135:104] instruction word
-       [100:0]   expected px_pkg::decode_t (bit layout mirrored in FIELDS below)
+       [101:0]   expected px_pkg::decode_t (bit layout mirrored in FIELDS below)
      The first line holds the number of mnemonic ids in [143:136] and the vector
      count in [135:104].
   2. A cross-check against GNU binutils: every word is disassembled with
-     riscv-none-elf-objdump (-M no-aliases,numeric). The model's mnemonic and operands
+     riscv-none-elf-objdump (-march=rv32im_zicsr_zifencei_zba_zbb_zbs_zicond,
+     -M no-aliases,numeric). The model's mnemonic and operands
      must agree with the disassembler, except for the documented differences in
      EXPECTED_DIFFERENCES. Any other disagreement makes the script exit with status 1.
 
@@ -39,6 +41,7 @@ TOOLCHAIN_DIRS = [Path(r"C:\xpack\xpack-riscv-none-elf-gcc-15.2.0-1\bin")]
 # machine-mode instructions MRET/WFI from the privileged ISA.
 # ---------------------------------------------------------------------------
 R = 0xFE00707F    # funct7 + funct3 + opcode
+I12 = 0xFFF0707F  # imm[11:0] (funct7 + rs2 field) + funct3 + opcode
 I = 0x0000707F    # funct3 + opcode
 U = 0x0000007F    # opcode only
 EXACT = 0xFFFFFFFF
@@ -62,12 +65,36 @@ ISA = {
     "mret": (EXACT, 0x30200073), "wfi": (EXACT, 0x10500073),
     "csrrw": (I, 0x1073), "csrrs": (I, 0x2073), "csrrc": (I, 0x3073),
     "csrrwi": (I, 0x5073), "csrrsi": (I, 0x6073), "csrrci": (I, 0x7073),
+    # Zba (bit manipulation 1.0.0, RV32 encodings)
+    "sh1add": (R, 0x20002033), "sh2add": (R, 0x20004033), "sh3add": (R, 0x20006033),
+    # Zbb
+    "andn": (R, 0x40007033), "orn": (R, 0x40006033), "xnor": (R, 0x40004033),
+    "clz": (I12, 0x60001013), "ctz": (I12, 0x60101013), "cpop": (I12, 0x60201013),
+    "max": (R, 0x0A006033), "maxu": (R, 0x0A007033), "min": (R, 0x0A004033), "minu": (R, 0x0A005033),
+    "sext.b": (I12, 0x60401013), "sext.h": (I12, 0x60501013), "zext.h": (I12, 0x08004033),
+    "rol": (R, 0x60001033), "ror": (R, 0x60005033), "rori": (R, 0x60005013),
+    "orc.b": (I12, 0x28705013), "rev8": (I12, 0x69805013),
+    # Zbs
+    "bclr": (R, 0x48001033), "bclri": (R, 0x48001013), "bext": (R, 0x48005033), "bexti": (R, 0x48005013),
+    "binv": (R, 0x68001033), "binvi": (R, 0x68001013), "bset": (R, 0x28001033), "bseti": (R, 0x28001013),
+    # Zicond 1.0
+    "czero.eqz": (R, 0x0E005033), "czero.nez": (R, 0x0E007033),
 }
 MNEMONICS = ["illegal"] + list(ISA)          # id = index
 
-ALU = {"add": 0, "sub": 1, "sll": 2, "slt": 3, "sltu": 4, "xor": 5, "srl": 6, "sra": 7, "or": 8, "and": 9}
+# px_pkg::alu_op_e numbering (D-028); register-register forms
+ALU = {"add": 0, "sh1add": 1, "sh2add": 2, "sh3add": 3, "sub": 4, "sll": 5, "slt": 6, "sltu": 7,
+       "xor": 8, "srl": 9, "sra": 10, "or": 11, "and": 12, "andn": 13, "orn": 14, "xnor": 15,
+       "max": 19, "maxu": 20, "min": 21, "minu": 22, "rol": 26, "ror": 27,
+       "bclr": 30, "bext": 31, "binv": 32, "bset": 33, "czero.eqz": 34, "czero.nez": 35}
+# register-immediate forms: the operation of the register form, b = imm
 ALU_IMM = {"addi": "add", "slti": "slt", "sltiu": "sltu", "xori": "xor", "ori": "or", "andi": "and",
-           "slli": "sll", "srli": "srl", "srai": "sra"}
+           "slli": "sll", "srli": "srl", "srai": "sra", "rori": "ror",
+           "bclri": "bclr", "bexti": "bext", "binvi": "binv", "bseti": "bset"}
+# unary Zbb operations in OP-IMM (a = rs1; b = the immediate, ignored by the ALU)
+ALU_UNARY_IMM = {"clz": 16, "ctz": 17, "cpop": 18, "sext.b": 23, "sext.h": 24, "orc.b": 28, "rev8": 29}
+ALU_ZEXTH = 25            # zext.h: OP major opcode, reads rs1 only
+SHIFT_IMM = ("slli", "srli", "srai", "rori", "bclri", "bexti", "binvi", "bseti")
 OPA_RS1, OPA_PC, OPA_ZERO = 0, 1, 2
 OPB_RS2, OPB_IMM, OPB_LINK = 0, 1, 2
 WB_ALU, WB_MEM, WB_CSR, WB_MULDIV = 0, 1, 2, 3
@@ -77,14 +104,14 @@ CSR_OP = {"rw": 0, "rs": 1, "rc": 2}
 # px_pkg::decode_t, most significant field first.
 FIELDS = [
     ("illegal", 1), ("rs1", 5), ("rs2", 5), ("rd", 5), ("rs1_used", 1), ("rs2_used", 1),
-    ("rd_we", 1), ("imm", 32), ("alu_op", 5), ("op_a", 2), ("op_b", 2), ("wb_sel", 2),
+    ("rd_we", 1), ("imm", 32), ("alu_op", 6), ("op_a", 2), ("op_b", 2), ("wb_sel", 2),
     ("is_branch", 1), ("branch_f3", 3), ("is_jal", 1), ("is_jalr", 1), ("is_load", 1),
     ("is_store", 1), ("mem_size", 2), ("mem_unsigned", 1), ("muldiv_en", 1), ("muldiv_op", 3),
     ("csr_en", 1), ("csr_op", 2), ("csr_use_imm", 1), ("csr_read", 1), ("csr_write", 1),
     ("csr_addr", 12), ("is_ecall", 1), ("is_ebreak", 1), ("is_mret", 1), ("is_wfi", 1),
     ("is_fence", 1), ("is_fence_i", 1),
 ]
-assert sum(w for _, w in FIELDS) == 101
+assert sum(w for _, w in FIELDS) == 102
 
 
 def bits(x, hi, lo):
@@ -135,6 +162,10 @@ def decode(w):
         d.update(is_store=1, rs1_used=1, rs2_used=1, op_b=OPB_IMM, imm=imm_s(w), mem_size=MEM_SIZE[m[1]])
     elif m in ALU_IMM:
         d.update(rd_we=1, rs1_used=1, op_b=OPB_IMM, imm=imm_i(w), alu_op=ALU[ALU_IMM[m]])
+    elif m in ALU_UNARY_IMM:
+        d.update(rd_we=1, rs1_used=1, op_b=OPB_IMM, imm=imm_i(w), alu_op=ALU_UNARY_IMM[m])
+    elif m == "zext.h":
+        d.update(rd_we=1, rs1_used=1, alu_op=ALU_ZEXTH)
     elif m in ALU:
         d.update(rd_we=1, rs1_used=1, rs2_used=1, alu_op=ALU[m])
     elif m in ("mul", "mulh", "mulhsu", "mulhu", "div", "divu", "rem", "remu"):
@@ -217,6 +248,24 @@ def words(rng):
         mask, match = ISA[m]
         for fill in (0x00000000, 0xFFFFFFFF, 0x80000000, 0x7FFFF000):
             out.append((fill & ~mask) | match)
+    # 8. Bit manipulation and Zicond spaces (step 2.1): every OP/OP-IMM funct3 for each funct7
+    #    the extensions use, with every rs2 field value (it selects the unary Zbb operations
+    #    and must be 0 for zext.h), shift amount bit 5 set, and the RV64-only neighbours in
+    #    the OP-32/OP-IMM-32 major opcodes (.w and .uw forms, RV64 rev8/zext.h encodings).
+    for op in (0x13, 0x33):
+        for f7 in (0x04, 0x05, 0x07, 0x10, 0x14, 0x20, 0x24, 0x30, 0x34, 0x15, 0x25, 0x31, 0x35):
+            for f3 in range(8):
+                for rs2 in range(32):
+                    rd, rs1, _ = regs()
+                    out.append((f7 << 25) | (rs2 << 20) | (rs1 << 15) | (f3 << 12) | (rd << 7) | op)
+    rv64 = [0x0800003B, 0x2000203B, 0x2000403B, 0x2000603B, 0x0800101B, 0x0800109B,  # add.uw, shNadd.uw, slli.uw
+            0x6000101B, 0x6010101B, 0x6020101B, 0x6000103B, 0x6000503B, 0x6000501B,  # clzw ctzw cpopw rolw rorw roriw
+            0x0800403B, 0x6B805013, 0x6B800013, 0x4A001013, 0x4A005013, 0x6A001013,  # zext.h/rev8 RV64, bclri/bexti/binvi shamt[5]
+            0x2A001013, 0x62005013, 0x0E00503B, 0x0E00703B, 0x08004033 | (1 << 20)]  # bseti/rori shamt[5], czero (OP-32), pack
+    for base in rv64:
+        out.append(base)
+        for _ in range(8):
+            out.append(base | (rng.randrange(32) << 7) | (rng.randrange(32) << 15))
     # Deduplicate, keep order.
     seen, uniq = set(), []
     for w in out:
@@ -262,7 +311,8 @@ def objdump_all(ws):
         # .insn rather than .word: the assembler marks .word as data, and objdump would
         # print it back as data instead of disassembling it.
         src.write_text(".text\n" + "".join(f".insn 4, 0x{w:08x}\n" for w in ws), newline="\n")
-        subprocess.run([asm, "-march=rv32im_zicsr_zifencei", "-mabi=ilp32", "-o", str(obj), str(src)], check=True)
+        subprocess.run([asm, "-march=rv32im_zicsr_zifencei_zba_zbb_zbs_zicond", "-mabi=ilp32", "-o", str(obj),
+                        str(src)], check=True)
         text = subprocess.run([objdump, "-d", "-M", "no-aliases,numeric", str(obj)],
                               check=True, capture_output=True, text=True).stdout
     result = {}
@@ -290,9 +340,12 @@ def check_operands(m, w, pc, ops):
     if m in ALU or m in ("mul", "mulh", "mulhsu", "mulhu", "div", "divu", "rem", "remu"):
         exp = [x(rd), x(rs1), x(rs2)]
         return None if parts == exp else f"{parts} != {exp}"
-    if m in ("slli", "srli", "srai"):
+    if m in SHIFT_IMM:
         ok = parts[:2] == [x(rd), x(rs1)] and num(parts[2]) == rs2
         return None if ok else f"{parts}"
+    if m in ALU_UNARY_IMM or m == "zext.h":
+        exp = [x(rd), x(rs1)]
+        return None if parts == exp else f"{parts} != {exp}"
     if m in ALU_IMM:
         ok = parts[:2] == [x(rd), x(rs1)] and num(parts[2]) == s(imm_i(w))
         return None if ok else f"{parts} imm {s(imm_i(w))}"
@@ -363,7 +416,7 @@ def cross_check(all_ws):
             stats["expected_diff"] += 1
             expected_seen[key] = expected_seen.get(key, 0) + 1
             continue
-        if model == "illegal" and known and mn in ("slli", "srli", "srai") and bits(w, 25, 25):
+        if model == "illegal" and known and mn in SHIFT_IMM and bits(w, 25, 25):
             # binutils accepts RV64 shift amounts; on RV32 imm[5] = 1 is reserved.
             key = "RV64 shift amount (imm[5]=1)"
             stats["expected_diff"] += 1

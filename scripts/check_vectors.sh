@@ -6,7 +6,9 @@
 # place and fails if any file differs from the committed version, which would mean the
 # models and the committed vectors have drifted apart. The decoder and decompressor
 # generators also cross-check their models against the GNU disassembler, so the RISC-V
-# toolchain must be installed (RISCV_BIN or the xPack default).
+# toolchain must be installed (RISCV_BIN or the xPack default); a skipped cross-check fails.
+# Vectors: px_alu 20,000 (36 operations, D-028), px_decoder (RV32I, M, Zicsr, Zifencei,
+# Zba/Zbb/Zbs/Zicond and their RV64-only neighbours), px_decompressor (every 16-bit word).
 #
 # Usage: bash scripts/check_vectors.sh   (exit 0: no drift)
 
@@ -23,7 +25,13 @@ fi
 for gen in gen_alu_vectors gen_decoder_vectors gen_decompressor_vectors; do
   "$PY" "scripts/$gen.py" > "sim/check_vectors_$gen.log" 2>&1 || {
     echo "FAIL check_vectors: scripts/$gen.py failed (sim/check_vectors_$gen.log)"; exit 1; }
+  # The disassembler cross-check is part of the evidence (since step 2.1 it also covers the
+  # Zba/Zbb/Zbs/Zicond encodings): a generator that skipped it fails the check.
+  if grep -q "objdump cross-check: SKIPPED" "sim/check_vectors_$gen.log"; then
+    echo "FAIL check_vectors: scripts/$gen.py skipped the objdump cross-check (toolchain not found)"; exit 1
+  fi
 done
+grep -h "objdump cross-check: [0-9]* agree" sim/check_vectors_gen_*_vectors.log | sed 's/^/  /'
 if git diff --quiet -- tb/unit/vectors; then
   echo "PASS check_vectors: regenerated vectors are identical to the committed ones"
 else

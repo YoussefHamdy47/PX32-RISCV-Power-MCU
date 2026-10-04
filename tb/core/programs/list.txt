@@ -12,3 +12,4 @@ t11_trap_mret
 t12_counters
 t13_muldiv
 t14_timing_isa
+t15_bitmanip

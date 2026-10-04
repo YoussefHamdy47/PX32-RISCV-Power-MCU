@@ -3,8 +3,9 @@
 // Three independent checks:
 //   1. Directed: instruction words produced by the GNU assembler, with the complete
 //      expected decode_t written out by hand for each one.
-//   2. Golden vectors: 54,957 words (every opcode x funct3 x funct7 combination that
-//      matters, every SYSTEM immediate, FENCE variants, CSR corner cases, random words)
+//   2. Golden vectors: 63,624 words (every opcode x funct3 x funct7 combination that
+//      matters, every SYSTEM immediate, FENCE variants, CSR corner cases, the Zba/Zbb/Zbs/
+//      Zicond spaces with every rs2 field and their RV64-only neighbours, random words)
 //      compared against scripts/gen_decoder_vectors.py. That model is table driven
 //      (mask/match) and is itself cross-checked against GNU objdump.
 //   3. Properties that hold for every word regardless of any model: an illegal word has
@@ -22,7 +23,7 @@ module tb_px_decoder;
   import px_pkg::*;
 
   localparam string VEC_FILE    = "tb/unit/vectors/decoder_vectors.hex";
-  localparam int    MAX_IDS     = 64;
+  localparam int    MAX_IDS     = 128;
 
   logic [31:0] instr;
   decode_t     dec;
@@ -119,7 +120,7 @@ module tb_px_decoder;
   // Coverage
   // ---------------------------------------------------------------------------
   bit cov_id    [MAX_IDS];
-  bit cov_alu   [10];
+  bit cov_alu   [ALU_NUM_OPS];
   bit cov_opa   [3];
   bit cov_opb   [3];
   bit cov_wb    [4];
@@ -130,7 +131,7 @@ module tb_px_decoder;
   task automatic sample(input int id);
     cov_id[id] = 1'b1;
     if (!dec.illegal) begin
-      if (dec.alu_op <= ALU_AND) cov_alu[dec.alu_op] = 1'b1;
+      if (int'(dec.alu_op) < ALU_NUM_OPS) cov_alu[dec.alu_op] = 1'b1;
       if (dec.op_a <= OPA_ZERO)  cov_opa[dec.op_a]   = 1'b1;
       if (dec.op_b <= OPB_LINK)  cov_opb[dec.op_b]   = 1'b1;
       cov_wb[dec.wb_sel] = 1'b1;
@@ -153,7 +154,7 @@ module tb_px_decoder;
     for (int i = 0; i < nids; i++) begin
       total++; if (!cov_id[i]) begin missing++; $display("  hole: mnemonic id %0d", i); end
     end
-    for (int i = 0; i < 10; i++) begin total++; if (!cov_alu[i])   begin missing++; $display("  hole: alu_op %0d", i);   end end
+    for (int i = 0; i < ALU_NUM_OPS; i++) begin total++; if (!cov_alu[i]) begin missing++; $display("  hole: alu_op %0d", i); end end
     for (int i = 0; i < 3;  i++) begin total++; if (!cov_opa[i])   begin missing++; $display("  hole: op_a %0d", i);     end end
     for (int i = 0; i < 3;  i++) begin total++; if (!cov_opb[i])   begin missing++; $display("  hole: op_b %0d", i);     end end
     for (int i = 0; i < 4;  i++) begin total++; if (!cov_wb[i])    begin missing++; $display("  hole: wb_sel %0d", i);   end end
@@ -235,6 +236,31 @@ module tb_px_decoder;
     apply_and_compare(32'h10200073, e);                                    // sret: illegal in M-only core
     e = '0; e.illegal = 1; e.rs2 = 5'd21; e.rs1 = 5'd2; e.rd = 5'd1;
     apply_and_compare(32'h03511093, e);                                    // slli x1,x2,53: RV64 only
+    // Zba/Zbb/Zbs/Zicond (step 2.1)
+    e = base(32'h203140b3); e.rd_we = 1; e.rs1_used = 1; e.rs2_used = 1; e.alu_op = ALU_SH2ADD;
+    apply_and_compare(32'h203140b3, e);                                    // sh2add x1,x2,x3
+    e = base(32'h60029213); e.rd_we = 1; e.rs1_used = 1; e.op_b = OPB_IMM; e.imm = 32'h0000_0600;
+    e.alu_op = ALU_CLZ;
+    apply_and_compare(32'h60029213, e);                                    // clz x4,x5
+    e = base(32'h61f3d313); e.rd_we = 1; e.rs1_used = 1; e.op_b = OPB_IMM; e.imm = 32'h0000_061F;
+    e.alu_op = ALU_ROR;
+    apply_and_compare(32'h61f3d313, e);                                    // rori x6,x7,31
+    e = base(32'h4854d413); e.rd_we = 1; e.rs1_used = 1; e.op_b = OPB_IMM; e.imm = 32'h0000_0485;
+    e.alu_op = ALU_BEXT;
+    apply_and_compare(32'h4854d413, e);                                    // bexti x8,x9,5
+    e = base(32'h0805c533); e.rd_we = 1; e.rs1_used = 1; e.alu_op = ALU_ZEXTH;
+    apply_and_compare(32'h0805c533, e);                                    // zext.h x10,x11: rs1 only
+    e = base(32'h0ee6f633); e.rd_we = 1; e.rs1_used = 1; e.rs2_used = 1; e.alu_op = ALU_CZERO_NEZ;
+    apply_and_compare(32'h0ee6f633, e);                                    // czero.nez x12,x13,x14
+    e = base(32'h69885793); e.rd_we = 1; e.rs1_used = 1; e.op_b = OPB_IMM; e.imm = 32'h0000_0698;
+    e.alu_op = ALU_REV8;
+    apply_and_compare(32'h69885793, e);                                    // rev8 x15,x16
+    e = '0; e.illegal = 1; e.rs2 = 5'd31; e.rs1 = 5'd7; e.rd = 5'd6;
+    apply_and_compare(32'h63f3d313, e);                                    // rori x6,x7,63: RV64 only
+    e = '0; e.illegal = 1; e.rs2 = 5'd1; e.rs1 = 5'd11; e.rd = 5'd10;
+    apply_and_compare(32'h0815c533, e);                                    // pack x10,x11,x1: Zbkb
+    e = '0; e.illegal = 1; e.rs2 = 5'd3; e.rs1 = 5'd2; e.rd = 5'd1;
+    apply_and_compare(32'h083100bb, e);                                    // add.uw x1,x2,x3: RV64 only
 
     // ---------------- 2 + 3. Golden vectors and properties ----------------
     // Streamed with $fscanf (the vector count is only known from the header line).
@@ -259,7 +285,7 @@ module tb_px_decoder;
         $finish;
       end
       id    = int'(line[143:136]);
-      exp_v = decode_t'(line[100:0]);
+      exp_v = decode_t'(line[101:0]);
       apply_and_compare(line[135:104], exp_v);
       check_properties(line[135:104]);
       sample(id);

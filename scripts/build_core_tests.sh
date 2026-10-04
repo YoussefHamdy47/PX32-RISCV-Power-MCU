@@ -22,7 +22,7 @@ mkdir -p "$OUT" sim/prog
 for src in sw/tests/core/*.S sw/tests/random/*.S sw/tests/random_long/*.S; do
   [ -f "$src" ] || continue
   name="$(basename "$src" .S)"
-  "$GCC" -march=rv32imc_zicsr_zifencei -mabi=ilp32 -nostdlib -nostartfiles -mno-relax \
+  "$GCC" -march=rv32imc_zicsr_zifencei_zba_zbb_zbs_zicond -mabi=ilp32 -nostdlib -nostartfiles -mno-relax \
          -T sw/common/link.ld -I sw/common sw/common/crt0.S "$src" -o "sim/prog/$name.elf"
   "$BIN/riscv-none-elf-objdump" -d -M no-aliases,numeric "sim/prog/$name.elf" > "sim/prog/$name.dis"
   "$PY" scripts/elf2hex.py "sim/prog/$name.elf" "$OUT/$name"

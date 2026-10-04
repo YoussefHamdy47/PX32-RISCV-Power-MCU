@@ -23,14 +23,14 @@
 # unsigned compare taken from the wrong bit
 
 [A05] rtl/core/px_alu.sv tb_px_alu,tb_px_alu_golden
-- ALU_OR:   result_o = a_i | b_i;
-+ ALU_OR:   result_o = a_i ^ b_i;
-# OR done as XOR
+- ALU_OR:        other_res = a_i | b_i;
++ ALU_OR:        other_res = a_i ^ b_i;
+# OR done as XOR (text follows the step 2.1 result mux, D-028)
 
 [A06] rtl/core/px_alu.sv tb_px_alu
-- default:  result_o = 32'd0;
-+ default:  result_o = sum;
-# undefined op code does not return 0
+- default:       other_res = 32'd0;
++ default:       other_res = sum;
+# undefined op code does not return 0 (text follows the step 2.1 result mux, D-028)
 
 [A07] rtl/core/px_alu.sv tb_px_alu,tb_px_alu_golden equivalent
 - assign shamt   = b_i[4:0];
@@ -85,9 +85,9 @@
 # branch immediate bits 11 and 12 swapped
 
 [D03] rtl/core/px_decoder.sv tb_px_decoder
-- if (f3 == F3_SLL && f7 != F7_BASE) legal = 1'b0;
-+ if (1'b0) legal = 1'b0;
-# SLLI with a nonzero funct7 (RV64 shift amount) accepted
+- if (f7 == F7_BASE)      d.alu_op = ALU_SLL;
++ if (f7[6:1] == 6'd0)    d.alu_op = ALU_SLL;
+# SLLI with imm[5] = 1 (RV64 shift amount) accepted (text follows the step 2.1 OP-IMM decode)
 
 [D04] rtl/core/px_decoder.sv tb_px_decoder
 - d.csr_read    = !((f3_lo == 2'b01) && (rd == 5'd0));
@@ -356,8 +356,8 @@
 # MRET clears MPIE instead of setting it
 
 [S04] rtl/core/px_csr.sv tb_px_csr
-- CSR_MISA:      ex_rdata_o = 32'h4000_1104;
-+ CSR_MISA:      ex_rdata_o = 32'h4000_0104;
+- CSR_MISA:      ex_rdata_o = MISA_VALUE;
++ CSR_MISA:      ex_rdata_o = MISA_VALUE & ~32'h0000_1000;
 # misa does not advertise M although MUL/DIV are implemented
 
 [S05] rtl/core/px_csr.sv tb_px_csr
@@ -612,3 +612,164 @@
 -       wb_csr_we_q   <= ex_dec_q.csr_en && ex_dec_q.csr_write;
 +       wb_csr_we_q   <= ex_dec_q.csr_en;
 # CSR reads without a write reported as CSR writes on the retirement interface
+
+# ------------------------------------------------------------------ step 2.1: Zba/Zbb/Zbs/Zicond (D-028)
+[B01] rtl/core/px_alu.sv tb_px_alu,tb_px_alu_golden
+- (shadd == 2'd2) ? {a_i[29:0], 2'b00} : {a_i[28:0], 3'b000};
++ (shadd == 2'd2) ? {a_i[30:0], 1'b0} : {a_i[28:0], 3'b000};
+# SH2ADD shifts rs1 by 1 (wrong shift amount in shNadd)
+
+[B02] rtl/core/px_alu.sv tb_px_alu,tb_px_alu_golden
+- assign shadd = op_i[1:0];       // 0 for ADD, n for SHnADD (D-028)
++ assign shadd = {op_i[0], op_i[1]};       // 0 for ADD, n for SHnADD (D-028)
+# SH1ADD and SH2ADD shift amounts swapped
+
+[B03] rtl/core/px_alu.sv tb_px_alu,tb_px_alu_golden
+- assign cz_res = cz1[31] ? {1'b0, z16, z8, z4, z2, z1} : 6'd32;
++ assign cz_res = cz1[31] ? {1'b0, z16, z8, z4, z2, 1'b0} : 6'd32;
+# CLZ/CTZ off by one for odd counts (last search step lost)
+
+[B04] rtl/core/px_alu.sv tb_px_alu,tb_px_alu_golden
+- assign cz_res = cz1[31] ? {1'b0, z16, z8, z4, z2, z1} : 6'd32;
++ assign cz_res = cz1[31] ? {1'b0, z16, z8, z4, z2, z1} : 6'd31;
+# CLZ/CTZ of zero gives 31 (off by one)
+
+[B05] rtl/core/px_alu.sv tb_px_alu,tb_px_alu_golden
+- assign cz_in = (op_i == ALU_CTZ) ? a_rev : a_i;
++ assign cz_in = a_i;
+# CTZ counts from the wrong end (computes CLZ)
+
+[B06] rtl/core/px_alu.sv tb_px_alu,tb_px_alu_golden
+- assign cpop_res = {1'b0, pc4[4:0]} + {1'b0, pc4[9:5]};
++ assign cpop_res = {1'b0, pc4[4:0]} + {2'b00, pc4[8:5]};
+# CPOP loses the top bit of the upper half's count (16 ones there count as 0)
+
+[B07] rtl/core/px_alu.sv tb_px_alu,tb_px_alu_golden
+- assign pc1[2*i +: 2] = {1'b0, a_i[2*i]} + {1'b0, a_i[2*i + 1]};
++ assign pc1[2*i +: 2] = {1'b0, a_i[2*i]} + {1'b0, a_i[2*i + 1] & (i != 15)};
+# CPOP ignores bit 31 (missing a bit)
+
+[B08] rtl/core/px_alu.sv tb_px_alu,tb_px_alu_golden
+- ALU_MAX:       other_res = lt_o  ? b_i : a_i;
++ ALU_MAX:       other_res = ltu_o ? b_i : a_i;
+# MAX compares unsigned (signedness swapped)
+
+[B09] rtl/core/px_alu.sv tb_px_alu,tb_px_alu_golden
+- ALU_MINU:      other_res = ltu_o ? a_i : b_i;
++ ALU_MINU:      other_res = lt_o  ? a_i : b_i;
+# MINU compares signed (signedness swapped)
+
+[B10] rtl/core/px_alu.sv tb_px_alu,tb_px_alu_golden
+- assign rol_res = rot_l[63:32];
++ assign rol_res = rot_r[31:0];
+# ROL rotates right (direction swapped)
+
+[B11] rtl/core/px_alu.sv tb_px_alu,tb_px_alu_golden
+- assign ror_res = rot_r[31:0];
++ assign ror_res = rot_r[63:32];
+# ROR without the wrap-around (a logical right shift)
+
+[B12] rtl/core/px_alu.sv tb_px_alu,tb_px_alu_golden
+- assign bext_res  = {31'd0, srl_res[0]};
++ assign bext_res  = {31'd0, srl_res[1]};
+# BEXT extracts bit index + 1 (wrong bit index)
+
+[B13] rtl/core/px_alu.sv tb_px_alu,tb_px_alu_golden
+- ALU_CZERO_EQZ: other_res = b_zero ? 32'd0 : a_i;
++ ALU_CZERO_EQZ: other_res = b_zero ? a_i : 32'd0;
+# CZERO.EQZ polarity inverted
+
+[B14] rtl/core/px_alu.sv tb_px_alu,tb_px_alu_golden
+- assign bmask     = 32'd1 << shamt;
++ assign bmask     = 32'd2 << shamt;
+# BCLR/BINV/BSET act on bit index + 1
+
+[B15] rtl/core/px_alu.sv tb_px_alu,tb_px_alu_golden
+- assign add_group = (op_i[5:2] == 4'd0);   // ADD, SH1ADD, SH2ADD, SH3ADD (D-028)
++ assign add_group = (op_i[5:3] == 3'd0);   // ADD, SH1ADD, SH2ADD, SH3ADD (D-028)
+# SUB, SLL, SLT and SLTU take the adder result
+
+[B16] rtl/core/px_alu.sv tb_px_alu,tb_px_alu_golden
+- assign rev8_res[8*k +: 8] = a_i[8*(3 - k) +: 8];
++ assign rev8_res[8*k +: 8] = a_i[8*k +: 8];
+# REV8 does not reverse the bytes
+
+[B17] rtl/core/px_alu.sv tb_px_alu,tb_px_alu_golden
+- assign orcb_res[8*k +: 8] = (a_i[8*k +: 8] != 8'd0) ? 8'hFF : 8'h00;
++ assign orcb_res[8*k +: 8] = (a_i[8*k +: 7] != 7'd0) ? 8'hFF : 8'h00;
+# ORC.B ignores the top bit of each byte
+
+[B18] rtl/core/px_alu.sv tb_px_alu,tb_px_alu_golden
+- assign sexth_res = {{16{a_i[15]}}, a_i[15:0]};
++ assign sexth_res = {{16{a_i[7]}}, a_i[15:0]};
+# SEXT.H extends from bit 7
+
+[B19] rtl/core/px_alu.sv tb_px_alu,tb_px_alu_golden
+- ALU_ANDN:      other_res = a_i & ~b_i;
++ ALU_ANDN:      other_res = ~a_i & b_i;
+# ANDN inverts the wrong operand
+
+[B20] rtl/core/px_alu.sv tb_px_alu,tb_px_alu_golden
+- assign z4   = (cz8[31:28] == 4'd0);
++ assign z4   = (cz8[31:29] == 3'd0);
+# a CLZ search step tests 3 bits instead of 4
+
+[B21] rtl/core/px_decoder.sv tb_px_decoder
+- else if (f7 == F7_ROT)  d.alu_op = ALU_ROR;       // rori
++ else if (f7[6:1] == 6'b011000) d.alu_op = ALU_ROR;       // rori
+# RORI with imm[5] = 1 (RV64 shift amount) accepted
+
+[B22] rtl/core/px_decoder.sv tb_px_decoder
+- if (f3 == F3_XOR && rs2 == 5'd0) begin
++ if (f3 == F3_XOR) begin
+# PACK (Zbkb, rs2 != 0) accepted as ZEXT.H
+
+[B23] rtl/core/px_decoder.sv tb_px_decoder
+- else if (imm12 == IMM_REV8) d.alu_op = ALU_REV8;
++ else if (imm12[11:6] == 6'b011010 && imm12[4:0] == 5'b11000) d.alu_op = ALU_REV8;
+# the RV64 REV8 encoding (imm 0x6B8) accepted
+
+[B24] rtl/core/px_decoder.sv tb_px_decoder
+- 3'b010:  d.alu_op = ALU_SH1ADD;
++ 3'b010:  d.alu_op = ALU_SH2ADD;
+# SH1ADD decoded as SH2ADD
+
+[B25] rtl/core/px_decoder.sv tb_px_decoder
+- d.rs2_used = 1'b0;
++ d.rs2_used = 1'b1;
+# ZEXT.H marked as reading rs2
+
+[B26] rtl/core/px_decoder.sv tb_px_decoder
+- else if (imm12 == IMM_CPOP)  d.alu_op = ALU_CPOP;
++ else if (imm12[11:2] == 10'b0110000000) d.alu_op = ALU_CPOP;
+# the reserved unary encoding imm 0x603 accepted as CPOP
+
+[B27] rtl/core/px_decoder.sv tb_px_decoder
+- 3'b100:  d.alu_op = ALU_MIN;
++ 3'b100:  d.alu_op = ALU_MINU;
+# MIN decoded as MINU
+
+[B28] rtl/core/px_decoder.sv tb_px_decoder
+- else if (f3 == 3'b111) d.alu_op = ALU_CZERO_NEZ;
++ else if (f3 == 3'b110) d.alu_op = ALU_CZERO_NEZ;
+# CZERO.NEZ decoded at the reserved funct3 110 and rejected at 111
+
+[B29] rtl/core/px_decoder.sv tb_px_decoder
+- else if (f7 == F7_BCLR) d.alu_op = ALU_BEXT;      // bexti
++ else if (f7 == F7_BCLR) d.alu_op = ALU_BCLR;      // bexti
+# BEXTI decoded as BCLRI
+
+[B30] rtl/pkg/px_pkg.sv tb_px_csr
+- localparam logic [31:0] MISA_VALUE = 32'h4000_1106;
++ localparam logic [31:0] MISA_VALUE = 32'h4000_1104;
+# misa does not advertise B although Zba, Zbb and Zbs are implemented
+
+[B31] rtl/core/px_alu.sv tb_core
+- ALU_CZERO_NEZ: other_res = b_zero ? a_i : 32'd0;
++ ALU_CZERO_NEZ: other_res = b_zero ? 32'd0 : a_i;
+# CZERO.NEZ polarity inverted: must be caught at core level (t15_bitmanip)
+
+[B32] rtl/core/px_decoder.sv tb_core
+- else if (imm12 == IMM_CLZ)   d.alu_op = ALU_CLZ;
++ else if (imm12 == IMM_CLZ)   begin d.alu_op = ALU_CLZ; d.rs1_used = 1'b0; end
+# CLZ not marked as reading rs1: no load-use stall, it reads a stale register (t15 test 56)
