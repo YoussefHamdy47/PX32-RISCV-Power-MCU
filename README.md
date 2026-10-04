@@ -1,6 +1,6 @@
 # PX32 RISC-V Power MCU
 
-PX32 is a 32-bit RISC-V microcontroller (MCU: a CPU with its memory and peripherals on one chip) designed specifically for the digital control of power electronics: DC-DC converters, power factor correction stages, inverters and motor drives. It pairs a small, fully deterministic in-order core with the peripherals that a switching converter actually needs: high-resolution PWM, ADCs that are triggered by the PWM, fast analog comparators, and a hardware protection path that does not depend on software.
+PX32 is a 32-bit RISC-V microcontroller project for the digital control of power electronics: DC-DC converters, power factor correction stages, inverters and motor drives. Phase 1 implements an in-order RV32IMC processor core with Zicsr and Zifencei, verified in simulation with behavioural memories. The planned microcontroller adds high-resolution PWM, PWM-triggered ADCs, fast analog comparators and a hardware protection path that does not depend on software.
 
 The first target application is an isolated 48 V to 12 V, 500 W converter built with GaN transistors. That design drives the requirements for the chip and serves as the reference for closed-loop verification.
 
@@ -88,7 +88,7 @@ Out of scope: an MMU, caches, out-of-order or superscalar execution, and running
 
 ### Instruction set
 
-PX32 implements RV32I with the M and C extensions, Zicsr and Zifencei, in machine mode with an optional user mode and 8 PMP regions. The full target adds:
+The current core implements RV32I with the M and C extensions, Zicsr and Zifencei, in machine mode. User mode and eight PMP regions are planned for Phase 2. The full target also adds:
 
 | Extension | Use in control code |
 |---|---|
