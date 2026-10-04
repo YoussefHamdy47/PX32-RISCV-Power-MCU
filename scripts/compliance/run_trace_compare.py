@@ -11,7 +11,8 @@ Suites:
   riscv-tests  pinned riscv-tests (D-024): rv32ui, rv32um, rv32uc required; rv32mi informational.
                Built as scripts/compliance/run_riscv_tests.py builds them.
   act4         riscv-arch-test 4.1.0 ELFs (--elf-dir, MANIFEST.txt checked as run_act4.py does):
-               I, M, Zca, Zicsr, Zifencei required; every other built ELF informational.
+               I, M, Zca, Zicsr, Zifencei, Zba, Zbb, Zbs, Zicond required; every other built ELF
+               informational.
   random       the long random programs (tb/core/programs/list_random_long.txt), on the tb_core
                map (tb_compliance +core_map, Spike map "core"); required. Their ELFs come from
                scripts/build_core_tests.sh (sim/prog/), and their loadable contents must equal
@@ -62,7 +63,7 @@ KNOWN = {
     "csr_probe_s02": ("C1 marchid", "Spike's marchid is 5 (its registered architecture ID, a constant); "
                       "PX32 reads 0 (D-022)", "x8 value: px32 00000000, spike 00000005"),
     "csr_probe_s04": ("C2 misa", "Spike's misa is writable (M and C can be cleared); PX32 ignores writes (D-022)",
-                      "CSR 301 value: px32 40001104, spike 40000100"),
+                      "CSR 301 value: px32 40001106, spike 40000100"),
     "csr_probe_s05": ("C3 mie", "Spike implements MSIE/MTIE/MEIE as writable; PX32 has no interrupt source "
                       "before the CLIC, so mie is read-only 0 (D-022)", "CSR 304 value: px32 00000000, spike 00000888"),
     "csr_probe_s06": ("C4 mtvec MODE", "Spike keeps MODE = Vectored; PX32 is Direct only (D-022)",
@@ -79,14 +80,14 @@ KNOWN = {
                             "px32 has a trap, spike a retirement"),
     "rv32mi-p-mcsr": ("C1 marchid", "the test reads marchid", "x10 value: px32 00000000, spike 00000005"),
     "rv32mi-p-ma_fetch": ("C2 misa", "the test clears misa.C to check IALIGN; PX32 ignores misa writes",
-                          "CSR 301 value: px32 40001104, spike 40001100"),
+                          "CSR 301 value: px32 40001106, spike 40001102"),
     "rv32mi-p-pmpaddr": ("C7 PMP CSRs", "the test programs PMP entries (it assumes PMP exists); Spike with zero "
                          "entries traps on pmpcfg0 where PX32 reads 0, and the test then branches",
                          "R1: px32 does something other than straight-line code"),
     # riscv-arch-test 4.1.0 informational groups
     "Sm_mcsr_access-00": ("C3 mie", "the test writes all mie bits", "CSR 304 value: px32 00000000, spike 00000888"),
     "Sm_mcsr_walk-01": ("C3 mie", "walking ones through mie", "CSR 304 value: px32 00000000, spike 00000008"),
-    "Sm_misa-00": ("C2 misa", "the test writes misa", "CSR 301 value: px32 40001104, spike 40000100"),
+    "Sm_misa-00": ("C2 misa", "the test writes misa", "CSR 301 value: px32 40001106, spike 40000100"),
     "csr_probe_s17": ("C8 mcause WLRL", "an illegal mcause value: PX32 keeps bit 31 and the code bits [4:0], "
                       "Spike keeps all bits (WLRL: either is legal)", "CSR 342 value: px32 0000001f, spike 7fffffff"),
 }

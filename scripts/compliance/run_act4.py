@@ -14,7 +14,7 @@ A test passes only if all of these hold:
   - the simulation ends without bench errors, deadlock, cycle limit or wall-clock limit
 Fail closed:
   - the suite checkout is not at the pinned 4.1.0 commit
-  - a required group (tests/rv32i/{I,M,Zca,Zicsr,Zifencei}) has no sources, or any source
+  - a required group (tests/rv32i/{I,M,Zca,Zicsr,Zifencei,Zba,Zbb,Zbs,Zicond}) has no sources, or any source
     has no ELF in --elf-dir (not built counts as a failure, never as skipped)
   - --elf-dir has no MANIFEST.txt (written by setup_act4_wsl.sh), or the manifest's suite
     commit or configuration hashes differ from the pinned commit and the repository's
@@ -42,7 +42,7 @@ sys.path.insert(0, str(ROOT / "scripts/compliance"))
 import run_riscv_tests as rt   # noqa: E402  (bench compile, simulate, tools)
 
 SUITE_COMMIT = "6e8a45123f14cebfb3df151a0e7b849b4389b33b"      # riscv-arch-test 4.1.0
-REQUIRED = ["I", "M", "Zca", "Zicsr", "Zifencei"]
+REQUIRED = ["I", "M", "Zca", "Zicsr", "Zifencei", "Zba", "Zbb", "Zbs", "Zicond"]   # Zb*, Zicond: step 2.1 (D-028)
 HALT, CONSOLE = "100ffff0", "100ffff8"                      # make_act4_config.py
 OUT = ROOT / "sim/compliance/act4"
 CONFIG = ROOT / "sw/compliance/act4/px32"

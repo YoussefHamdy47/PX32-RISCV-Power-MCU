@@ -31,7 +31,7 @@ for gen in gen_alu_vectors gen_decoder_vectors gen_decompressor_vectors; do
     echo "FAIL check_vectors: scripts/$gen.py skipped the objdump cross-check (toolchain not found)"; exit 1
   fi
 done
-grep -h "objdump cross-check: [0-9]* agree" sim/check_vectors_gen_*_vectors.log | sed 's/^/  /'
+grep -hE "objdump cross-check: [0-9]+ (agree|of)" sim/check_vectors_gen_*_vectors.log | sed 's/^/  /'
 if git diff --quiet -- tb/unit/vectors; then
   echo "PASS check_vectors: regenerated vectors are identical to the committed ones"
 else

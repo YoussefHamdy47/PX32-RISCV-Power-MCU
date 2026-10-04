@@ -7,9 +7,10 @@ PMP) at the pinned suite commit, with every PX32-specific change listed explicit
 Each edit must apply exactly once, otherwise the script stops (fail closed), so an upstream
 template change cannot silently produce a wrong PX32 configuration.
 
-PX32 facts encoded (D-022, D-023, contract section 1):
-  I 2.1, M 2.0 (Zmmul), C 2.0 (Zca), Zicsr 2.0, Zifencei 2.0, Sm (priv. 20240411 = 1.13.0)
-  misa fixed (0x4000_1104); mtvec Direct only, BASE 4-byte aligned; a write keeps BASE and
+PX32 facts encoded (D-022, D-023, D-028, contract section 1):
+  I 2.1, M 2.0 (Zmmul), C 2.0 (Zca), Zicsr 2.0, Zifencei 2.0, Sm (priv. 20240411 = 1.13.0),
+  B 1.0.0 (Zba, Zbb, Zbs 1.0.0) and Zicond 1.0.0 since Phase 2 step 2.1
+  misa fixed (0x4000_1106, B read-only like the other bits); mtvec Direct only, BASE 4-byte aligned; a write keeps BASE and
   forces MODE to Direct (Sail can only ignore the whole write: Xtvec_Ignore)
   misaligned exceptions rank above access faults (raised in EX before any bus request)
   mvendorid/marchid/mimpid 0 (not implemented); mhartid 0; mconfigptr 0
@@ -60,7 +61,8 @@ def sub(text, pattern, new, what):
 def udb(tpl):
     t = tpl
     t = sub(t, r"^name: cv32a65x$", "name: px32", "name")
-    t = sub(t, r"^description: .*$", "description: PX32 Phase 1 core (RV32IMC_Zicsr_Zifencei, M-mode only)", "description")
+    t = sub(t, r"^description: .*$",
+            "description: PX32 core (RV32IMC_Zicsr_Zifencei_Zba_Zbb_Zbs_Zicond, M-mode only)", "description")
     t = sub(t, r"^implemented_extensions:\n(?:  - .*\n)+",
             "implemented_extensions:\n"
             "  - { name: I, version: \"= 2.1\" }\n"
@@ -70,7 +72,14 @@ def udb(tpl):
             "  - { name: Zca, version: \"= 1.0.0\" }\n"
             "  - { name: Zicsr, version: \"= 2.0\" }\n"
             "  - { name: Zifencei, version: \"= 2.0\" }\n"
+            "  - { name: B, version: \"= 1.0.0\" }\n"
+            "  - { name: Zba, version: \"= 1.0.0\" }\n"
+            "  - { name: Zbb, version: \"= 1.0.0\" }\n"
+            "  - { name: Zbs, version: \"= 1.0.0\" }\n"
+            "  - { name: Zicond, version: \"= 1.0.0\" }\n"
             "  - { name: Sm, version: \"= 1.13.0\" }\n", "extensions")
+    # misa.B is read-only one, like the rest of misa (D-022, D-028)
+    t = sub(t, r"^  MUTABLE_MISA_C: false$", "  MUTABLE_MISA_C: false\n  MUTABLE_MISA_B: false", "MUTABLE_MISA_B")
     t = sub(t, r"^  PMA_GRANULARITY: .*$", "  PMA_GRANULARITY: 2 # 4-byte natural granule (32-bit OBI, byte enables)", "PMA")
     t = sub(t, r"^  MTVAL_WIDTH: .*$", "  MTVAL_WIDTH: 32 # full mtval (D-022)", "MTVAL_WIDTH")
     t = sub(t, r"^  MISALIGNED_LDST_EXCEPTION_PRIORITY: low$",
@@ -127,8 +136,8 @@ def sail(tpl):
     t = sub(t, r'"simple_interrupt_generator": \{\s*"supported": false,\s*"base": 0\s*\}',
             '"simple_interrupt_generator": {\n      "supported": true,\n      "base": 201326592\n    }',
             "interrupt generator")
-    for ext, sup in [("Zifencei", "true"), ("Zcb", "false"), ("Zba", "false"), ("Zbb", "false"),
-                     ("Zbs", "false"), ("Zbc", "false")]:
+    for ext, sup in [("Zifencei", "true"), ("Zcb", "false"), ("Zba", "true"), ("Zbb", "true"),
+                     ("Zbs", "true"), ("Zbc", "false"), ("B", "true"), ("Zicond", "true")]:
         t = sub(t, rf'("{ext}": \{{\s*"supported": )(true|false)', rf"\g<1>{sup}", ext)
     # xtval: PX32 writes mtval for every exception class it raises (D-022)
     t = sub(t, r"^    // mtval is hardwired to 0 in CVA6.*$",

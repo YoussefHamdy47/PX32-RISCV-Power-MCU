@@ -10,7 +10,7 @@ $schema: config_schema.json#
 kind: architecture configuration
 type: fully configured
 name: px32
-description: PX32 Phase 1 core (RV32IMC_Zicsr_Zifencei, M-mode only)
+description: PX32 core (RV32IMC_Zicsr_Zifencei_Zba_Zbb_Zbs_Zicond, M-mode only)
 implemented_extensions:
   - { name: I, version: "= 2.1" }
   - { name: M, version: "= 2.0" }
@@ -19,6 +19,11 @@ implemented_extensions:
   - { name: Zca, version: "= 1.0.0" }
   - { name: Zicsr, version: "= 2.0" }
   - { name: Zifencei, version: "= 2.0" }
+  - { name: B, version: "= 1.0.0" }
+  - { name: Zba, version: "= 1.0.0" }
+  - { name: Zbb, version: "= 1.0.0" }
+  - { name: Zbs, version: "= 1.0.0" }
+  - { name: Zicond, version: "= 1.0.0" }
   - { name: Sm, version: "= 1.13.0" }
 
 params:
@@ -26,6 +31,7 @@ params:
   MXLEN: 32
   MUTABLE_MISA_M: false
   MUTABLE_MISA_C: false
+  MUTABLE_MISA_B: false
 
   # Addressing & Memory
   PHYS_ADDR_WIDTH: 32

@@ -8,7 +8,9 @@
 #   map core:       ITCM 64 KB at 0x1000_0000 and DTCM 64 KB at 0x2000_0000 (tb_compliance
 #                   +core_map, the tb_core map without its side-effect device)
 # Spike options (D-026):
-#   --isa=rv32imc_zicsr_zifencei --priv=m      PX32 Phase 1 ISA, machine mode only
+#   --isa=rv32imc_zicsr_zifencei_zba_zbb_zbs_zicond --priv=m
+#                                               PX32 ISA (Zb* and Zicond since step 2.1, D-028;
+#                                               Spike sets misa.B itself), machine mode only
 #   --pmpregions=0 --triggers=0                 no PMP entries, no trigger module
 #   --disable-dtb --pc=0x10000000               no boot ROM, no device tree, no CLINT/PLIC/UART:
 #                                               execution starts at the PX32 reset address with
@@ -43,7 +45,7 @@ run_one() {
   err="${out%.log.gz}.stderr"
   h='[0-9a-f]'
   # Spike ends on SIGPIPE once the filter has exited; its stderr goes to <out>.stderr
-  { "$SPIKE" --isa=rv32imc_zicsr_zifencei --priv=m --pmpregions=0 --triggers=0 --disable-dtb \
+  { "$SPIKE" --isa=rv32imc_zicsr_zifencei_zba_zbb_zbs_zicond --priv=m --pmpregions=0 --triggers=0 --disable-dtb \
       --pc=0x10000000 -m"$mem" --wfi-as-nop -l --log-commits --log=/dev/stdout "$elf" \
       2> "$err" || true; } \
     | awk -v pat="mem 0x$halt 0x$h$h$h$h$h$h$h$h\$" -v maxl="$maxl" \

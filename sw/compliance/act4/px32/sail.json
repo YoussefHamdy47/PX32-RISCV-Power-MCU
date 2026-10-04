@@ -224,7 +224,7 @@
       }
     },
     "B": {
-      "supported": false
+      "supported": true
     },
     "S": {
       "supported": false
@@ -269,7 +269,7 @@
       "supported": false
     },
     "Zicond": {
-      "supported": false
+      "supported": true
     },
     "Zicntr": {
       "supported": false
@@ -353,13 +353,13 @@
       "supported": false
     },
     "Zba": {
-      "supported": false
+      "supported": true
     },
     "Zbb": {
-      "supported": false
+      "supported": true
     },
     "Zbs": {
-      "supported": false
+      "supported": true
     },
     "Zbc": {
       "supported": false

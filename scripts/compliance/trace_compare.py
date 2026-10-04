@@ -611,6 +611,8 @@ def _fixtures():
     zt_s = "core   0: 3 0x10000048 (0x34031473) x8  0x10000000 c832_mscratch 0x00000123\n"
     cwi_d = "1000004c 3402d073 0 00000000 1 340 {}\n".format              # csrwi mscratch, 5
     cwi_s = "core   0: 3 0x1000004c (0x3402d073) c832_mscratch 0x00000005\n"
+    bm_d = "10000048 {} 8 {} 0 000 00000000\n".format                    # bit manipulation, rd = x8
+    bm_s = "core   0: 3 0x10000048 (0x{}) x8  0x{}\n".format
     taint_addr_s = sp.replace("(0x006303b3) x7  0x00000246", "(0x006303b3) x5  0x00000246")
     taint_addr_d = du.replace("006303b3 7 00000246", "006303b3 5 00000247").replace(
         "b0002373 6 00000123", "b0002373 6 00000124")
@@ -706,6 +708,30 @@ def _fixtures():
         "l2_other_csr": (du.replace("10000040 00004501", "1000003c 34001073 0 00000000 1 340 00000000\n10000040 00004501"),
                          sp.replace("core   0: 3 0x10000040 (0x4501)", "core   0: 3 0x1000003c (0x34001073)\ncore   0: 3 0x10000040 (0x4501)"),
                          'px32 writes CSR 340'),
+        # Zba/Zbb/Zbs/Zicond (step 2.1): operands() needs no change (OP and OP-IMM); x6 is
+        # tainted (mcycle), x5 = 0x10000000 is not. One instruction of each encoding kind:
+        # register-register with the taint in rs1 and in rs2, unary OP-IMM (rs2 field is a
+        # function code), immediate form (rs2 field is the shift amount)
+        "bm_rr_taint_rs1": (dm.replace(halt_d, bm_d("20532433", "100008ac") + halt_d),        # sh1add x8, x6, x5
+                            sm.replace(halt_s, bm_s("20532433", "10000246") + halt_s), True),
+        "bm_rr_taint_rs2": (dm.replace(halt_d, bm_d("2062c433", "40000456") + halt_d),        # sh2add x8, x5, x6
+                            sm.replace(halt_s, bm_s("2062c433", "40000123") + halt_s), True),
+        "bm_unary_taint": (dm.replace(halt_d, bm_d("60231413", "00000005") + halt_d),         # cpop x8, x6
+                           sm.replace(halt_s, bm_s("60231413", "00000004") + halt_s), True),
+        "bm_imm_taint": (dm.replace(halt_d, bm_d("60435413", "60000045") + halt_d),           # rori x8, x6, 4
+                         sm.replace(halt_s, bm_s("60435413", "30000012") + halt_s), True),
+        # the rs2 field of a unary instruction is not a source: cpop x8, x5 has rs2 field x2,
+        # and a tainted x2 must not excuse a wrong result
+        "bm_unary_rs2_field_not_source": (dm.replace(halt_d, "10000048 00030133 2 00000456 0 000 00000000\n"   # add x2, x6, x0
+                                                     + bm_d("60229413", "00000004") + halt_d),
+                                          sm.replace(halt_s, "core   0: 3 0x10000048 (0x00030133) x2  0x00000123\n"
+                                                     + bm_s("60229413", "00000001") + halt_s), 'x8 value'),
+        "bm_untainted_wrong": (du.replace(halt_d, bm_d("60029413", "00000004") + halt_d),     # clz x8, x5
+                               sp.replace(halt_s, bm_s("60029413", "00000003") + halt_s), 'x8 value'),
+        # a tainted bit-manipulation result used as a store address base
+        "bm_taint_to_address": (dm.replace("006303b3 7 000008ac", "200322b3 5 000008ac"),     # sh1add x5, x6, x0
+                                sm.replace("(0x006303b3) x7  0x00000246", "(0x200322b3) x5  0x00000246"),
+                                'reached a memory address'),
     }
 
 
