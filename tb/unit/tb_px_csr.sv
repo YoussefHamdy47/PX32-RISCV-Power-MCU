@@ -7,7 +7,10 @@
 // constants, so a mistake shared by the RTL and the model is still caught.
 //
 //   T1 reset values of every implemented CSR (explicit constants), counters held in reset
-//   T2 legality of all 4096 addresses, with and without a write, against an explicit list
+//   T2 legality of all 4096 addresses, with and without a write, against an explicit list;
+//      sub-unit ownership (step 2.2a, D-032): for all 4096 addresses exactly one bit of
+//      the top's per-unit hit vectors is set for an implemented address and none for any
+//      other, on the ID and on the EX side (counted separately from the checks)
 //   T3 every writable field (PMP CSRs: read-only 0): all-ones/all-zeros through RW, RS, RC, walking ones; reserved
 //      and read-only bits read 0; WARL registers ignore writes
 //   T4 no commit, no change: a write that does not commit leaves every CSR unchanged
@@ -58,6 +61,7 @@ module tb_px_csr;
   localparam logic [1:0] OP_RW = 2'd0, OP_RS = 2'd1, OP_RC = 2'd2;
 
   int checks = 0;
+  int unit_checks = 0;
   int posedges = 0;
   always @(posedge clk) if (rst_n) posedges++;
   int errors = 0;
@@ -331,6 +335,21 @@ module tb_px_csr;
     id_addr = 12'hB01; id_write = 0; #1; if (!id_illegal) fail("T2: 0xB01 accepted");
     id_addr = 12'h001; id_write = 0; #1; if (!id_illegal) fail("T2: fflags accepted");
     checks += 9;
+    // sub-unit ownership (D-032): exactly one unit for an implemented address, none otherwise
+    begin
+      logic [11:0] ex_save;
+      ex_save = ex_addr;
+      for (int a = 0; a < 4096; a++) begin
+        id_addr = a; ex_addr = a;
+        #1;
+        unit_checks += 2;
+        if ($countones(dut.id_hit_u) != (implemented[a] ? 1 : 0))
+          fail($sformatf("T2: addr %03h: %0d units hit in ID", a, $countones(dut.id_hit_u)));
+        if ($countones(dut.ex_hit_u) != (implemented[a] ? 1 : 0))
+          fail($sformatf("T2: addr %03h: %0d units hit in EX", a, $countones(dut.ex_hit_u)));
+      end
+      ex_addr = ex_save;
+    end
     @(posedge clk); #1;
     m_cycle = m_cycle + (posedges - p2);
     id_addr = 12'h300; id_write = 0;
@@ -533,8 +552,8 @@ module tb_px_csr;
     end
 
     if (errors == 0)
-      $display("PASS tb_px_csr (%0d checks, 4096 addresses x 2 legality, %0d random cycles, full functional coverage)",
-               checks, NUM_RANDOM);
+      $display("PASS tb_px_csr (%0d checks, 4096 addresses x 2 legality, %0d sub-unit ownership checks, %0d random cycles, full functional coverage)",
+               checks, unit_checks, NUM_RANDOM);
     else begin
       $display("FAIL tb_px_csr (%0d errors, %0d checks)", errors, checks);
       $fatal(1, "tb_px_csr failed");

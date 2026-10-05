@@ -20,12 +20,13 @@ smtbmc bitwuzla
 
 [script]
 plugin -i slang
-bmc: read_slang px_pkg.sv px_csr.sv px_csr_fv.sv --top px_csr_fv
-prove: read_slang -DINDUCTION px_pkg.sv px_csr.sv px_csr_fv.sv --top px_csr_fv
-cover: read_slang px_pkg.sv px_csr.sv px_csr_fv.sv --top px_csr_fv
+bmc: read_slang px_pkg.sv px_csr_m.sv px_csr.sv px_csr_fv.sv --top px_csr_fv
+prove: read_slang -DINDUCTION px_pkg.sv px_csr_m.sv px_csr.sv px_csr_fv.sv --top px_csr_fv
+cover: read_slang px_pkg.sv px_csr_m.sv px_csr.sv px_csr_fv.sv --top px_csr_fv
 prep -top px_csr_fv
 
 [files]
 rtl/pkg/px_pkg.sv
+rtl/core/px_csr_m.sv
 rtl/core/px_csr.sv
 tb/formal/px_csr_fv.sv

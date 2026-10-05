@@ -28,9 +28,14 @@
 //   B4  trap > MRET > write: after trap_i, mepc/mcause/mtval hold the trap values,
 //       MIE = 0 and MPIE = the old MIE, whatever MRET or commit did; after mret_i without
 //       trap_i, MIE = the old MPIE and MPIE = 1, and the write is dropped
+//   H1  (step 2.2a, D-032) sub-unit ownership: at most one bit of the top's per-unit hit
+//       vectors (dut.id_hit_u, dut.ex_hit_u) is set, and one is set exactly when the
+//       model implements the address (ID and EX side)
 // B1-B4 follow from A1-A2 and are kept as separate, model-free statements of the audit's
 // list. The prove task (k-induction) also asserts that px_csr's state registers equal the
 // model (I1), which makes the induction step hold, so the result is unbounded.
+// Since step 2.2a px_csr is a top with sub-units (D-032): the state registers named below
+// live in its unit px_csr_m (instance dut.u_m); the model and A1-B4, I1 are unchanged.
 // Tasks: bmc (depth 12), prove (k-induction), cover (a committed write of each writable
 // CSR, a trap, an MRET, both counter carries, minstret written while an older instruction
 // retires).
@@ -194,7 +199,7 @@ module px_csr_fv (
     p_code  <= trap_cause_i;
     p_irq   <= trap_irq_i;
     p_mie   <= mie_o;
-    p_mpie  <= dut.mpie_q;
+    p_mpie  <= dut.u_m.mpie_q;
     p_mtvec <= mtvec_o;
     p_mepc  <= mepc_o;
   end
@@ -226,27 +231,32 @@ module px_csr_fv (
           ex_addr_i == 12'hF11 || ex_addr_i == 12'hF12 || ex_addr_i == 12'hF14 || ex_addr_i == 12'hF15)
         assert (rdata == 32'd0);
       if (ex_addr_i == 12'h300) assert (rdata[12:11] == 2'b11 && (rdata & ~32'h0000_1888) == 32'd0);
+      // H1
+      assert ((dut.id_hit_u & (dut.id_hit_u - 1'b1)) == '0);
+      assert ((dut.id_hit_u != '0) == implemented(id_addr_i));
+      assert ((dut.ex_hit_u & (dut.ex_hit_u - 1'b1)) == '0);
+      assert ((dut.ex_hit_u != '0) == implemented(ex_addr_i));
       // B3, B4 (the cycle after)
       if (p_valid && !p_cause) begin
-        assert (mtvec_o == p_mtvec && mepc_o == p_mepc && mie_o == p_mie && dut.mpie_q == p_mpie);
+        assert (mtvec_o == p_mtvec && mepc_o == p_mepc && mie_o == p_mie && dut.u_m.mpie_q == p_mpie);
       end
       if (p_valid && p_trap) begin
         assert (mepc_o == {p_pc[31:1], 1'b0});
-        assert (dut.mcause_irq_q == p_irq && dut.mcause_code_q == p_code && dut.mtval_q == p_tval);
-        assert (mie_o == 1'b0 && dut.mpie_q == p_mie);
+        assert (dut.u_m.mcause_irq_q == p_irq && dut.u_m.mcause_code_q == p_code && dut.u_m.mtval_q == p_tval);
+        assert (mie_o == 1'b0 && dut.u_m.mpie_q == p_mie);
       end
       if (p_valid && p_mret && !p_trap) begin
-        assert (mie_o == p_mpie && dut.mpie_q == 1'b1);
+        assert (mie_o == p_mpie && dut.u_m.mpie_q == 1'b1);
         assert (mtvec_o == p_mtvec && mepc_o == p_mepc);
       end
 `ifdef INDUCTION
       // I1: px_csr's state equals the model (makes the induction step hold)
-      assert (dut.mie_q == m_mie && dut.mpie_q == m_mpie);
-      assert ({dut.mtvec_base_q, 2'b00} == m_mtvec && dut.mscratch_q == m_mscratch);
-      assert ({dut.mepc_q, 1'b0} == m_mepc && dut.mtval_q == m_mtval);
-      assert (dut.mcause_irq_q == m_irq && dut.mcause_code_q == m_code);
-      assert ({dut.mcycle_hi_q, dut.mcycle_lo_q} == m_cycle);
-      assert ({dut.minstret_hi_q, dut.minstret_lo_q} == m_instret);
+      assert (dut.u_m.mie_q == m_mie && dut.u_m.mpie_q == m_mpie);
+      assert ({dut.u_m.mtvec_base_q, 2'b00} == m_mtvec && dut.u_m.mscratch_q == m_mscratch);
+      assert ({dut.u_m.mepc_q, 1'b0} == m_mepc && dut.u_m.mtval_q == m_mtval);
+      assert (dut.u_m.mcause_irq_q == m_irq && dut.u_m.mcause_code_q == m_code);
+      assert ({dut.u_m.mcycle_hi_q, dut.u_m.mcycle_lo_q} == m_cycle);
+      assert ({dut.u_m.minstret_hi_q, dut.u_m.minstret_lo_q} == m_instret);
 `endif
     end
   end
@@ -263,7 +273,7 @@ module px_csr_fv (
       cover (m_we && ex_addr_i == 12'h342);
       cover (m_we && ex_addr_i == 12'h343);
       cover (trap_i && mie_o);
-      cover (mret_i && !trap_i && dut.mpie_q);
+      cover (mret_i && !trap_i && dut.u_m.mpie_q);
       cover (m_cycle[31:0] == 32'hFFFF_FFFF && !m_we);
       cover (m_instret[31:0] == 32'hFFFF_FFFF && retire_i && !m_we);
       cover (m_we && ex_addr_i == 12'hB02 && retire_i);
