@@ -100,6 +100,41 @@ module px_core #(
   output logic [4:0]  trap_cause_o,
   output logic [31:0] trap_pc_o,
   output logic [31:0] trap_tval_o
+`ifdef RISCV_FORMAL
+  ,
+  // riscv-formal retirement interface (DECISIONS.md D-030), only with RISCV_FORMAL defined:
+  // one entry per retired or trapping instruction, in program order, riscv-formal
+  // conventions (traps are entries with rvf_trap_o = 1; memory fields word aligned)
+  output logic        rvf_valid_o,
+  output logic [63:0] rvf_order_o,
+  output logic [31:0] rvf_insn_o,
+  output logic        rvf_trap_o,
+  output logic        rvf_halt_o,
+  output logic        rvf_intr_o,
+  output logic [1:0]  rvf_mode_o,
+  output logic [1:0]  rvf_ixl_o,
+  output logic [4:0]  rvf_rs1_addr_o,
+  output logic [4:0]  rvf_rs2_addr_o,
+  output logic [31:0] rvf_rs1_rdata_o,
+  output logic [31:0] rvf_rs2_rdata_o,
+  output logic [4:0]  rvf_rd_addr_o,
+  output logic [31:0] rvf_rd_wdata_o,
+  output logic [31:0] rvf_pc_rdata_o,
+  output logic [31:0] rvf_pc_wdata_o,
+  output logic [31:0] rvf_mem_addr_o,
+  output logic [3:0]  rvf_mem_rmask_o,
+  output logic [3:0]  rvf_mem_wmask_o,
+  output logic [31:0] rvf_mem_rdata_o,
+  output logic [31:0] rvf_mem_wdata_o,
+  // CSR access of the retiring Zicsr instruction (the wrapper maps it to riscv-formal's
+  // per-CSR signals): read/write as decided by the encoding, old value, value after the write
+  output logic        rvf_csr_valid_o,
+  output logic [11:0] rvf_csr_addr_o,
+  output logic        rvf_csr_read_o,
+  output logic        rvf_csr_write_o,
+  output logic [31:0] rvf_csr_rdata_o,
+  output logic [31:0] rvf_csr_wdata_o
+`endif
 );
 
   import px_pkg::*;
@@ -441,7 +476,33 @@ module px_core #(
 
   // Result written to rd: the CSR's old value for CSR instructions, the quotient or
   // remainder for divides, else the ALU result (a multiply's result is added in WB).
+`ifdef RISCV_FORMAL_ALTOPS
+  // riscv-formal alternative M results (D-030): same timing and the same data paths as the
+  // real units (a divide's result in ex_result, a multiply's in its own WB register, never in
+  // wb_result_q, so WB forwarding of a multiply is as wrong as in the real design and a
+  // missing MUL-use stall stays visible). Formal runs only; px_mul and px_div drive nothing.
+  logic [31:0] alt_res;
+  always_comb begin
+    case (ex_dec_q.muldiv_op)
+      F3_MUL:    alt_res = (fwd_a + fwd_b) ^ 32'h5876_063E;
+      F3_MULH:   alt_res = (fwd_a + fwd_b) ^ 32'hF658_3FB7;
+      F3_MULHSU: alt_res = (fwd_a - fwd_b) ^ 32'hECFB_E137;
+      F3_MULHU:  alt_res = (fwd_a + fwd_b) ^ 32'h949C_E5E8;
+      F3_DIV:    alt_res = (fwd_a - fwd_b) ^ 32'h7F85_29EC;
+      F3_DIVU:   alt_res = (fwd_a - fwd_b) ^ 32'h10E8_FD70;
+      F3_REM:    alt_res = (fwd_a - fwd_b) ^ 32'h8DA6_8FA5;
+      default:   alt_res = (fwd_a - fwd_b) ^ 32'h3138_D0E1;   // F3_REMU
+    endcase
+  end
+  assign ex_result = ex_dec_q.csr_en ? csr_rdata : ex_is_div ? alt_res : alu_res;
+  logic [31:0] wb_alt_mul_q;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni)       wb_alt_mul_q <= 32'd0;
+    else if (!wb_wait) wb_alt_mul_q <= alt_res;
+  end
+`else
   assign ex_result = ex_dec_q.csr_en ? csr_rdata : ex_is_div ? div_result : alu_res;
+`endif
 
   // ===========================================================================
   // WB stage
@@ -465,7 +526,11 @@ module px_core #(
   assign load_val = (wb_size_q == MEM_B) ? {{24{ld_byte_sign}}, ld_byte} :
                     (wb_size_q == MEM_H) ? {{16{ld_half_sign}}, ld_half} : data_rdata_i;
 
+`ifdef RISCV_FORMAL_ALTOPS
+  assign wb_wdata_rf = wb_is_load_q ? load_val : wb_is_mul_q ? wb_alt_mul_q : wb_result_q;
+`else
   assign wb_wdata_rf = wb_is_load_q ? load_val : wb_is_mul_q ? mul_result : wb_result_q;
+`endif
 
   logic wb_retire;
   assign wb_retire = wb_valid_q && !wb_wait && !wb_bus_err;
@@ -615,5 +680,112 @@ module px_core #(
   assign rvfi_csr_we_o    = wb_retire && wb_csr_we_q;
   assign rvfi_csr_addr_o  = wb_csr_we_q ? wb_csr_addr_q : 12'd0;
   assign rvfi_csr_wdata_o = wb_csr_we_q ? wb_csr_wdata_q : 32'd0;
+
+`ifdef RISCV_FORMAL
+  // ===========================================================================
+  // riscv-formal retirement interface (D-030)
+  // ===========================================================================
+  // Report sources, never more than one per cycle:
+  //   WB retirement (wb_retire) and a WB bus error (the WB instruction traps) exclude each
+  //   other; a trap raised in EX is reported one cycle later from the f_tr_* registers: the
+  //   older instruction may retire in WB in the trap cycle, and the cycle after a trap has
+  //   no WB instruction (ex_to_wb is 0 for a trapping instruction).
+  logic [4:0]  ex_f_rs1_addr, ex_f_rs2_addr;
+  logic [31:0] ex_f_rs1_rdata, ex_f_rs2_rdata, ex_f_pc_wdata;
+  assign ex_f_rs1_addr  = ex_dec_q.rs1_used ? ex_dec_q.rs1 : 5'd0;
+  assign ex_f_rs2_addr  = ex_dec_q.rs2_used ? ex_dec_q.rs2 : 5'd0;
+  assign ex_f_rs1_rdata = ex_dec_q.rs1_used ? fwd_a : 32'd0;
+  assign ex_f_rs2_rdata = ex_dec_q.rs2_used ? fwd_b : 32'd0;
+  // Next pc in program order (JAL's target equals pc + its J immediate, as br_target)
+  assign ex_f_pc_wdata  = (br_taken || ex_dec_q.is_jal) ? br_target :
+                          ex_is_jalr ? jalr_target :
+                          ex_is_mret ? csr_mepc :
+                          ex_pc_q + (ex_is_c_q ? 32'd2 : 32'd4);
+
+  logic [4:0]  wb_f_rs1_addr_q, wb_f_rs2_addr_q;
+  logic [31:0] wb_f_rs1_rdata_q, wb_f_rs2_rdata_q, wb_f_pc_wdata_q;
+  logic        wb_f_csr_q, wb_f_csr_read_q, wb_f_csr_write_q;
+  logic [31:0] wb_f_csr_rdata_q;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      wb_f_rs1_addr_q  <= 5'd0;  wb_f_rs2_addr_q  <= 5'd0;
+      wb_f_rs1_rdata_q <= 32'd0; wb_f_rs2_rdata_q <= 32'd0; wb_f_pc_wdata_q <= 32'd0;
+      wb_f_csr_q <= 1'b0; wb_f_csr_read_q <= 1'b0; wb_f_csr_write_q <= 1'b0;
+      wb_f_csr_rdata_q <= 32'd0;
+    end else if (!wb_wait) begin
+      wb_f_rs1_addr_q  <= ex_f_rs1_addr;  wb_f_rs2_addr_q  <= ex_f_rs2_addr;
+      wb_f_rs1_rdata_q <= ex_f_rs1_rdata; wb_f_rs2_rdata_q <= ex_f_rs2_rdata;
+      wb_f_pc_wdata_q  <= ex_f_pc_wdata;
+      wb_f_csr_q       <= ex_dec_q.csr_en;
+      wb_f_csr_read_q  <= ex_dec_q.csr_read;
+      wb_f_csr_write_q <= ex_dec_q.csr_write;
+      wb_f_csr_rdata_q <= csr_rdata;
+    end
+  end
+
+  // EX trap, reported in the next cycle
+  logic        f_tr_valid_q;
+  logic [31:0] f_tr_pc_q, f_tr_insn_q, f_tr_rs1_rdata_q, f_tr_rs2_rdata_q, f_tr_pc_wdata_q;
+  logic [4:0]  f_tr_rs1_addr_q, f_tr_rs2_addr_q;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      f_tr_valid_q <= 1'b0;
+      f_tr_pc_q <= 32'd0; f_tr_insn_q <= 32'd0; f_tr_pc_wdata_q <= 32'd0;
+      f_tr_rs1_addr_q <= 5'd0; f_tr_rs2_addr_q <= 5'd0;
+      f_tr_rs1_rdata_q <= 32'd0; f_tr_rs2_rdata_q <= 32'd0;
+    end else begin
+      f_tr_valid_q <= ex_trap;
+      if (ex_trap) begin
+        f_tr_pc_q        <= ex_pc_q;
+        f_tr_insn_q      <= ex_raw_q;
+        f_tr_pc_wdata_q  <= csr_mtvec;
+        f_tr_rs1_addr_q  <= ex_f_rs1_addr;  f_tr_rs2_addr_q  <= ex_f_rs2_addr;
+        f_tr_rs1_rdata_q <= ex_f_rs1_rdata; f_tr_rs2_rdata_q <= ex_f_rs2_rdata;
+      end
+    end
+  end
+
+  logic f_report, f_trap, f_intr_q;
+  logic [63:0] f_order_q;
+  assign f_report = wb_retire || wb_bus_err || f_tr_valid_q;
+  assign f_trap   = wb_bus_err || f_tr_valid_q;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      f_order_q <= 64'd0;
+      f_intr_q  <= 1'b0;
+    end else if (f_report) begin
+      f_order_q <= f_order_q + 64'd1;
+      f_intr_q  <= f_trap;          // the next entry is the handler's first instruction
+    end
+  end
+
+  assign rvf_valid_o     = f_report;
+  assign rvf_order_o     = f_order_q;
+  assign rvf_insn_o      = f_tr_valid_q ? f_tr_insn_q : wb_raw_q;
+  assign rvf_trap_o      = f_trap;
+  assign rvf_halt_o      = 1'b0;
+  assign rvf_intr_o      = f_intr_q;
+  assign rvf_mode_o      = 2'd3;         // machine mode only
+  assign rvf_ixl_o       = 2'd1;         // XLEN 32
+  assign rvf_rs1_addr_o  = f_tr_valid_q ? f_tr_rs1_addr_q  : wb_f_rs1_addr_q;
+  assign rvf_rs2_addr_o  = f_tr_valid_q ? f_tr_rs2_addr_q  : wb_f_rs2_addr_q;
+  assign rvf_rs1_rdata_o = f_tr_valid_q ? f_tr_rs1_rdata_q : wb_f_rs1_rdata_q;
+  assign rvf_rs2_rdata_o = f_tr_valid_q ? f_tr_rs2_rdata_q : wb_f_rs2_rdata_q;
+  assign rvf_rd_addr_o   = (wb_retire && wb_rd_we_q) ? wb_rd_q : 5'd0;
+  assign rvf_rd_wdata_o  = (wb_retire && wb_rd_we_q) ? wb_wdata_rf : 32'd0;
+  assign rvf_pc_rdata_o  = f_tr_valid_q ? f_tr_pc_q : wb_pc_q;
+  assign rvf_pc_wdata_o  = f_tr_valid_q ? f_tr_pc_wdata_q : wb_bus_err ? csr_mtvec : wb_f_pc_wdata_q;
+  assign rvf_mem_addr_o  = (wb_retire && wb_is_mem) ? {wb_addr_q[31:2], 2'b00} : 32'd0;
+  assign rvf_mem_rmask_o = (wb_retire && wb_is_load_q)  ? wb_be_q : 4'd0;
+  assign rvf_mem_wmask_o = (wb_retire && wb_is_store_q) ? wb_be_q : 4'd0;
+  assign rvf_mem_rdata_o = (wb_retire && wb_is_load_q)  ? data_rdata_i : 32'd0;
+  assign rvf_mem_wdata_o = (wb_retire && wb_is_store_q) ? wb_wdata_q : 32'd0;
+  assign rvf_csr_valid_o = wb_retire && wb_f_csr_q;
+  assign rvf_csr_addr_o  = wb_csr_addr_q;
+  assign rvf_csr_read_o  = wb_f_csr_read_q;
+  assign rvf_csr_write_o = wb_f_csr_write_q;
+  assign rvf_csr_rdata_o = wb_f_csr_rdata_q;
+  assign rvf_csr_wdata_o = wb_csr_wdata_q;
+`endif
 
 endmodule
