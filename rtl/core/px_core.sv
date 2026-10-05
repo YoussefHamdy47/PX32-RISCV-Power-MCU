@@ -146,6 +146,7 @@ module px_core #(
   // ===========================================================================
   logic        wb_wait, wb_bus_err;
   logic        ex_hold, ex_redirect, ex_trap, ex_to_wb;
+  logic        hold_older, hold_grant, hold_div;
   logic        id_hold, id_redirect;
   logic        if_redirect;
   logic [31:0] if_redirect_pc;
@@ -542,11 +543,21 @@ module px_core #(
   // ===========================================================================
   // Hazards, redirects, traps
   // ===========================================================================
-  assign ex_hold = wb_wait || (ex_mem_go && !data_gnt_i) || div_wait;
-  assign id_hold = ex_hold || load_use;
+  // EX hold causes (D-033, PHASE2_ARCHITECTURE.md § 3.1, audit B-02):
+  //   hold_older  the older access in WB has not responded (its error has priority)
+  //   hold_grant  the EX access has no granted request yet
+  //   hold_div    a divide is running (an interrupt kills it, D-023)
+  // EX trap and EX redirect ignore hold_grant (audit B-01): an instruction held only by
+  // it is a memory access without exception, which neither traps in EX nor redirects, so
+  // data_gnt_i does not reach the instruction port through them.
+  assign hold_older = wb_wait;
+  assign hold_grant = ex_mem_go && !data_gnt_i;
+  assign hold_div   = div_wait;
+  assign ex_hold    = hold_older || hold_grant || hold_div;
+  assign id_hold    = ex_hold || load_use;
 
-  assign ex_trap     = ex_valid_q && ex_exc && !ex_hold && !wb_bus_err;
-  assign ex_redirect = ex_valid_q && !ex_hold && !wb_bus_err &&
+  assign ex_trap     = ex_valid_q && ex_exc && !(hold_older || hold_div) && !wb_bus_err;
+  assign ex_redirect = ex_valid_q && !(hold_older || hold_div) && !wb_bus_err &&
                        (ex_exc || br_taken || ex_dec_q.is_jalr || ex_dec_q.is_fence_i ||
                         ex_dec_q.is_mret);
   assign id_redirect = id_valid_q && !id_hold && !ex_redirect && !wb_bus_err &&

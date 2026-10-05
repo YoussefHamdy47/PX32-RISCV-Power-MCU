@@ -1,0 +1,35 @@
+# The grant term dropped from ex_trap/ex_redirect in step 2.2b is redundant in every
+# reachable state (audit B-01, DECISIONS.md D-033; properties in tb/formal/px_core_b01.sv).
+# Run: scripts/formal.sh   (results in sim/formal/px_core_b01_<task>/)
+# formal-default-tasks: prove cover
+[tasks]
+prove
+cover
+
+[options]
+prove: mode prove
+prove: depth 2
+cover: mode cover
+cover: depth 8
+
+[engines]
+smtbmc bitwuzla
+
+[script]
+plugin -i slang
+read_slang px_pkg.sv px_alu.sv px_regfile.sv px_decoder.sv px_decompressor.sv px_if_stage.sv px_csr_m.sv px_csr.sv px_mul.sv px_div.sv px_core.sv px_core_b01.sv --top px_core_b01
+prep -top px_core_b01
+
+[files]
+rtl/pkg/px_pkg.sv
+rtl/core/px_alu.sv
+rtl/core/px_regfile.sv
+rtl/core/px_decoder.sv
+rtl/core/px_decompressor.sv
+rtl/core/px_if_stage.sv
+rtl/core/px_csr_m.sv
+rtl/core/px_csr.sv
+rtl/core/px_mul.sv
+rtl/core/px_div.sv
+rtl/core/px_core.sv
+tb/formal/px_core_b01.sv
