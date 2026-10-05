@@ -175,7 +175,7 @@ module px_core #(
   logic        wb_wait, wb_bus_err;
   logic        ex_hold, ex_redirect, ex_trap, ex_to_wb;
   logic        hold_older, hold_grant, hold_div;
-  logic        csr_mie, irq_elig, irq_take, dreq_gate, dreq_pend_q;
+  logic        csr_mie, irq_elig, irq_go, irq_take, dreq_gate, dreq_pend_q;
   logic        id_hold, id_redirect;
   logic        if_redirect;
   logic [31:0] if_redirect_pc;
@@ -494,7 +494,7 @@ module px_core #(
   px_div u_div (
     .clk_i, .rst_ni,
     .valid_i (div_valid),
-    .kill_i  (wb_bus_err || irq_take),
+    .kill_i  (wb_bus_err || irq_go),
     .accept_i(div_accept),
     .op_i    (ex_md_op),
     .a_i     (fwd_a),
@@ -593,8 +593,14 @@ module px_core #(
 
   // Take: from flops and wb_wait/wb_bus_err only (no data_gnt_i, no ex_to_wb). A WB bus
   // error and a synchronous exception in EX come first (contract § 2.3).
-  assign irq_take   = irq_elig && !wb_bus_err && !hold_older && !dreq_pend_q &&
-                      !(ex_valid_q && ex_exc);
+  // irq_go is the take without the EX-exception term. Whenever irq_go is set and EX holds
+  // an exception, the EX trap redirects to mtvec and flushes ID and EX anyway (hold_older
+  // is 0, a faulting instruction has no divide running), so the redirect, the flushes, the
+  // commit block and the divider kill use irq_go and keep the exception decode (address
+  // adder -> misaligned) off the take's path into the fetch address (D-033, § 10 risk row).
+  // The trap report, mcause and the acknowledge use the exact irq_take.
+  assign irq_go     = irq_elig && !wb_bus_err && !hold_older && !dreq_pend_q;
+  assign irq_take   = irq_go && !(ex_valid_q && ex_exc);
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) dreq_pend_q <= 1'b0;
@@ -602,15 +608,15 @@ module px_core #(
   end
 
   assign ex_trap     = ex_valid_q && ex_exc && !(hold_older || hold_div) && !wb_bus_err;
-  assign ex_redirect = ex_valid_q && !(hold_older || hold_div) && !wb_bus_err && !irq_take &&
+  assign ex_redirect = ex_valid_q && !(hold_older || hold_div) && !wb_bus_err && !irq_go &&
                        (ex_exc || br_taken || ex_dec_q.is_jalr || ex_dec_q.is_fence_i ||
                         ex_dec_q.is_mret);
-  assign id_redirect = id_valid_q && !id_hold && !ex_redirect && !wb_bus_err && !irq_take &&
+  assign id_redirect = id_valid_q && !id_hold && !ex_redirect && !wb_bus_err && !irq_go &&
                        dec.is_jal && !id_ferr_q && !id_illegal;
 
-  assign if_redirect = wb_bus_err || ex_redirect || id_redirect || irq_take;
+  assign if_redirect = wb_bus_err || ex_redirect || id_redirect || irq_go;
   always_comb begin
-    if (wb_bus_err || ex_trap || irq_take) if_redirect_pc = csr_mtvec;
+    if (wb_bus_err || ex_trap || irq_go)   if_redirect_pc = csr_mtvec;
     else if (ex_redirect) begin
       if (br_taken)                  if_redirect_pc = br_target;
       else if (ex_is_jalr)           if_redirect_pc = jalr_target;
@@ -637,7 +643,7 @@ module px_core #(
   // Pipeline registers
   // ===========================================================================
 
-  assign ex_to_wb = ex_valid_q && !ex_hold && !ex_exc && !wb_bus_err && !irq_take;
+  assign ex_to_wb = ex_valid_q && !ex_hold && !ex_exc && !wb_bus_err && !irq_go;
   logic id_to_ex;
   assign id_to_ex = id_valid_q && !id_hold;
 
@@ -647,7 +653,7 @@ module px_core #(
       id_valid_q <= 1'b0;
       id_pc_q    <= 32'd0; id_instr_q <= 32'd0; id_raw_q <= 32'd0;
       id_is_c_q  <= 1'b0;  id_ill_c_q <= 1'b0;  id_ferr_q <= 1'b0;  id_ferr_hi_q <= 1'b0;
-    end else if (wb_bus_err || ex_redirect || id_redirect || irq_take) begin
+    end else if (wb_bus_err || ex_redirect || id_redirect || irq_go) begin
       id_valid_q <= 1'b0;
     end else if (!id_hold) begin
       id_valid_q <= if_valid;
@@ -670,7 +676,7 @@ module px_core #(
       ex_dec_q   <= '0;
       ex_rs1_q   <= 32'd0; ex_rs2_q <= 32'd0;
       fwd_a_q    <= 1'b0;  fwd_b_q  <= 1'b0;
-    end else if (wb_bus_err || ex_redirect || irq_take) begin
+    end else if (wb_bus_err || ex_redirect || irq_go) begin
       ex_valid_q <= 1'b0;
       fwd_a_q    <= 1'b0;  fwd_b_q  <= 1'b0;
     end else if (!ex_hold) begin

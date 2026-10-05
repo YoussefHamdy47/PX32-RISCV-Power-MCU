@@ -7,7 +7,7 @@
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
-export PATH="$PATH:/c/iverilog/bin"
+export PATH="/c/iverilog/bin:$PATH"   # the pinned Icarus 12 first (the OSS CAD Suite ships another)
 
 TB="${1:?usage: run_unit.sh <tb_name> [source_list.f] [plusargs...]}"
 shift
