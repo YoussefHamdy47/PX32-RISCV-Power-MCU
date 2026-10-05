@@ -1,0 +1,46 @@
+# Equivalence of the step 2.2a CSR split with the Phase 1 px_csr (DECISIONS.md D-032;
+# miter and properties in tb/formal/px_csr_equiv.sv).
+# Run: scripts/formal.sh   (it first writes the reference named below to
+#      sim/formal/ref/px_csr_ref.sv; results in sim/formal/px_csr_equiv_<task>/). The
+#      default tasks (unbounded proofs for both parameter sets, cover) take seconds. The
+#      output-only BMC tasks (depth 24, several minutes each) run after formal.sh with:
+#      sby -f --prefix sim/formal/px_csr_equiv tb/formal/px_csr_equiv.sby bmc bmc_alt
+# formal-ref: 467133efdf02525d78fe028c4a12764be6a57024 rtl/core/px_csr.sv px_csr px_csr_ref
+# formal-default-tasks: prove prove_alt cover
+[tasks]
+prove
+bmc
+prove_alt
+bmc_alt
+cover
+
+[options]
+prove: mode prove
+prove: depth 2
+prove_alt: mode prove
+prove_alt: depth 2
+bmc: mode bmc
+bmc: depth 24
+bmc_alt: mode bmc
+bmc_alt: depth 24
+cover: mode cover
+cover: depth 8
+
+[engines]
+smtbmc bitwuzla
+
+[script]
+plugin -i slang
+prove: read_slang -DINDUCTION px_pkg.sv px_csr_m.sv px_csr.sv px_csr_ref.sv px_csr_equiv.sv --top px_csr_equiv
+prove_alt: read_slang -DINDUCTION -DALT px_pkg.sv px_csr_m.sv px_csr.sv px_csr_ref.sv px_csr_equiv.sv --top px_csr_equiv
+bmc: read_slang px_pkg.sv px_csr_m.sv px_csr.sv px_csr_ref.sv px_csr_equiv.sv --top px_csr_equiv
+bmc_alt: read_slang -DALT px_pkg.sv px_csr_m.sv px_csr.sv px_csr_ref.sv px_csr_equiv.sv --top px_csr_equiv
+cover: read_slang px_pkg.sv px_csr_m.sv px_csr.sv px_csr_ref.sv px_csr_equiv.sv --top px_csr_equiv
+prep -top px_csr_equiv
+
+[files]
+rtl/pkg/px_pkg.sv
+rtl/core/px_csr_m.sv
+rtl/core/px_csr.sv
+sim/formal/ref/px_csr_ref.sv
+tb/formal/px_csr_equiv.sv
