@@ -31,6 +31,8 @@
 //   H1  (step 2.2a, D-032) sub-unit ownership: at most one bit of the top's per-unit hit
 //       vectors (dut.id_hit_u, dut.ex_hit_u) is set, and one is set exactly when the
 //       model implements the address (ID and EX side)
+//   H2  (step 2.2a, D-032) a sub-unit that does not own the EX address drives 0 on its
+//       read and write-back data (the top ORs the units' values)
 // B1-B4 follow from A1-A2 and are kept as separate, model-free statements of the audit's
 // list. The prove task (k-induction) also asserts that px_csr's state registers equal the
 // model (I1), which makes the induction step hold, so the result is unbounded.
@@ -62,6 +64,9 @@ module px_csr_fv (
 
   localparam logic [31:0] RESET_VEC = 32'h1000_0040;
   localparam logic [31:0] IMPID     = 32'h0000_5A5A;   // nonzero, so it is observable
+  // px_csr's number of sub-units (its localparam NU, D-032); keep equal when a unit is
+  // added (yosys-slang does not accept $bits on the hierarchical dut.ex_hit_u)
+  localparam int          NU        = 1;
 
   logic init = 1'b1;
   always_ff @(posedge clk_i) init <= 1'b0;
@@ -236,6 +241,9 @@ module px_csr_fv (
       assert ((dut.id_hit_u != '0) == implemented(id_addr_i));
       assert ((dut.ex_hit_u & (dut.ex_hit_u - 1'b1)) == '0);
       assert ((dut.ex_hit_u != '0) == implemented(ex_addr_i));
+      // H2
+      for (int k = 0; k < NU; k++)
+        if (!dut.ex_hit_u[k]) assert (dut.ex_rdata_u[k] == 32'd0 && dut.ex_wdata_u[k] == 32'd0);
       // B3, B4 (the cycle after)
       if (p_valid && !p_cause) begin
         assert (mtvec_o == p_mtvec && mepc_o == p_mepc && mie_o == p_mie && dut.u_m.mpie_q == p_mpie);

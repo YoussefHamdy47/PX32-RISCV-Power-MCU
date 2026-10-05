@@ -38,7 +38,8 @@
 // that no unit hits illegal.
 //
 // EX (ex_*): ex_hit_o and a combinational read of the addressed CSR as seen by the
-// instruction in EX (0 when the address is not this unit's). The write happens on the
+// instruction in EX. ex_rdata_o and ex_wdata_o are 0 when the address is not this unit's
+// (the top ORs the units' values, D-032). The write happens on the
 // clock edge when ex_commit_i is set; the top has already removed trap and MRET cycles
 // from it (D-032: trap > MRET > write for every unit), so each access has its side effects
 // exactly once. The value written is RW: operand, RS: old | operand, RC: old & ~operand,

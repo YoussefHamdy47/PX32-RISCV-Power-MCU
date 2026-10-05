@@ -18,8 +18,9 @@
 //     in tb_px_csr over all 4096 addresses and by property H1 of tb/formal/px_csr_fv.sv);
 //   - id_illegal_o: no unit hits, or the hitting unit rejects the access (a write attempt
 //     to a read-only address, later reserved forms and privilege);
-//   - ex_rdata_o, ex_wdata_o: OR over the units of the unit's value qualified by its EX
-//     hit, i.e. the value of the hitting unit (0 when no unit hits);
+//   - ex_rdata_o, ex_wdata_o: OR over the units; every unit drives 0 at the addresses it
+//     does not own (checked by tb_px_csr and property H2 of px_csr_fv), so this is the
+//     value of the hitting unit (0 when no unit hits);
 //   - trap > MRET > write for every unit: the units see ex_commit_i && !trap_i && !mret_i
 //     as their commit; trap_i/mret_i go to every unit holding trap state;
 //   - mtvec_o, mepc_o, mstatus_mie_o, ex_noinc_o come from the owning unit (px_csr_m).
@@ -82,8 +83,12 @@ module px_csr #(
   // ---------------------------------------------------------------------------
   localparam int NU = 1;
 
-  logic [NU-1:0]       id_hit_u, id_ill_u, ex_hit_u;
+  logic [NU-1:0]       id_hit_u, id_ill_u;
   logic [NU-1:0][31:0] ex_rdata_u, ex_wdata_u;
+  // EX ownership: read only by the ownership checks (tb_px_csr, px_csr_fv H1/H2)
+  /* verilator lint_off UNUSEDSIGNAL */
+  logic [NU-1:0]       ex_hit_u;
+  /* verilator lint_on UNUSEDSIGNAL */
 
   // Commit seen by every unit: trap > MRET > write
   logic commit_u;
@@ -125,15 +130,15 @@ module px_csr #(
   // No unit owns the address: illegal; otherwise the owning unit's verdict.
   assign id_illegal_o = !(|id_hit_u) || |(id_hit_u & id_ill_u);
 
-  // Value of the unit that hits the EX address (0 when none does)
+  // Value of the unit that hits the EX address: a unit drives 0 at every address it does not
+  // own, so the OR of all units is the owner's value (0 when no unit owns the address). No
+  // hit qualification here: it would add a gate level to the CSR read path into WB (D-032).
   always_comb begin
     ex_rdata_o = 32'd0;
     ex_wdata_o = 32'd0;
     for (int k = 0; k < NU; k++) begin
-      if (ex_hit_u[k]) begin
-        ex_rdata_o = ex_rdata_o | ex_rdata_u[k];
-        ex_wdata_o = ex_wdata_o | ex_wdata_u[k];
-      end
+      ex_rdata_o = ex_rdata_o | ex_rdata_u[k];
+      ex_wdata_o = ex_wdata_o | ex_wdata_u[k];
     end
   end
 

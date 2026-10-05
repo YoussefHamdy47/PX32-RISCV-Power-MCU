@@ -423,10 +423,11 @@
 + assign id_illegal_o = |(id_hit_u & id_ill_u);
 # an address that no unit owns is accepted
 
-[U03] rtl/core/px_csr.sv tb_px_csr
--       if (ex_hit_u[k]) begin
-+       if (id_hit_u[k]) begin
-# read and write-back data selected by the ID hit instead of the EX hit
+[U03] rtl/core/px_csr_m.sv tb_px_csr
+-       default:       ex_rdata_o = 32'd0;
++       default:       ex_rdata_o = mstatus_val;
+# px_csr_m drives read data at addresses it does not own: the top's OR would corrupt the
+# read of another unit's CSR (today: unimplemented addresses read nonzero)
 
 [U04] rtl/core/px_csr_m.sv tb_px_csr
 - assign id_hit_o = csr_exists(id_addr_i);

@@ -10,7 +10,9 @@
 //   T2 legality of all 4096 addresses, with and without a write, against an explicit list;
 //      sub-unit ownership (step 2.2a, D-032): for all 4096 addresses exactly one bit of
 //      the top's per-unit hit vectors is set for an implemented address and none for any
-//      other, on the ID and on the EX side (counted separately from the checks)
+//      other, on the ID and on the EX side; in every compared cycle, a unit that does not
+//      own the EX address drives 0 on its read and write-back data (both counted
+//      separately from the checks)
 //   T3 every writable field (PMP CSRs: read-only 0): all-ones/all-zeros through RW, RS, RC, walking ones; reserved
 //      and read-only bits read 0; WARL registers ignore writes
 //   T4 no commit, no change: a write that does not commit leaves every CSR unchanged
@@ -212,6 +214,12 @@ module tb_px_csr;
     if (mtvec_o !== m_mtvec) fail($sformatf("%s: mtvec_o %08h, model %08h", where, mtvec_o, m_mtvec));
     if (mepc_o  !== m_mepc)  fail($sformatf("%s: mepc_o %08h, model %08h", where, mepc_o, m_mepc));
     if (mie_o   !== m_mie)   fail($sformatf("%s: MIE %b, model %b", where, mie_o, m_mie));
+    // D-032: a sub-unit that does not own the EX address drives 0 (the top ORs the units)
+    for (int k = 0; k < $bits(dut.ex_hit_u); k++) begin
+      unit_checks++;
+      if (!dut.ex_hit_u[k] && (dut.ex_rdata_u[k] !== 32'd0 || dut.ex_wdata_u[k] !== 32'd0))
+        fail($sformatf("%s: unit %0d drives data at %03h, which it does not own", where, k, ex_addr));
+    end
   endtask
 
   // One cycle: inputs were set before; compare, then step the model at the edge
