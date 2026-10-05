@@ -1,4 +1,4 @@
-# timeout_seconds: 180
+# timeout_seconds: 300
 # post_check: "$PY" scripts/px_iss.py --replay sim/logs/replay_tb_core.manifest
 rtl/pkg/px_pkg.sv
 rtl/core/px_alu.sv

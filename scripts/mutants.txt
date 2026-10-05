@@ -169,18 +169,21 @@
 # load-use hazard not detected on rs2
 
 [P04] rtl/core/px_core.sv tb_core
-- assign data_req_o   = ex_mem_go && !wb_wait && !wb_bus_err;
-+ assign data_req_o   = ex_mem_go && !wb_bus_err;
+- assign data_req_o   = ex_mem_go && !wb_wait && !wb_bus_err && !dreq_gate;
++ assign data_req_o   = ex_mem_go && !wb_bus_err && !dreq_gate;
+# (retargeted to the step 2.2b lines, D-033: same bug)
 # younger access issued while the older one still waits for its response
 
 [P05] rtl/core/px_core.sv tb_core
-- assign data_req_o   = ex_mem_go && !wb_wait && !wb_bus_err;
-+ assign data_req_o   = ex_mem_go && !wb_wait;
+- assign data_req_o   = ex_mem_go && !wb_wait && !wb_bus_err && !dreq_gate;
++ assign data_req_o   = ex_mem_go && !wb_wait && !dreq_gate;
+# (retargeted to the step 2.2b lines, D-033: same bug)
 # younger access issued in the cycle the older one returns a bus error
 
 [P06] rtl/core/px_core.sv tb_core
-- end else if (wb_bus_err || ex_redirect) begin\n      ex_valid_q <= 1'b0;
-+ end else if (ex_redirect) begin\n      ex_valid_q <= 1'b0;
+- end else if (wb_bus_err || ex_redirect || irq_go) begin\n      ex_valid_q <= 1'b0;
++ end else if (ex_redirect || irq_go) begin\n      ex_valid_q <= 1'b0;
+# (retargeted to the step 2.2b lines, D-033: same bug)
 # a WB bus error does not flush EX
 
 [P07] rtl/core/px_core.sv tb_core equivalent
@@ -247,13 +250,15 @@
 # store data not moved to the addressed byte lanes
 
 [P19] rtl/core/px_core.sv tb_core
-- if (wb_bus_err || ex_trap)       if_redirect_pc = csr_mtvec;
-+ if (ex_trap)                     if_redirect_pc = csr_mtvec;
+- if (wb_bus_err || ex_trap || irq_go)   if_redirect_pc = csr_mtvec;
++ if (ex_trap || irq_go)                 if_redirect_pc = csr_mtvec;
+# (retargeted to the step 2.2b lines, D-033: same bug)
 # a WB bus error redirects to the wrong address
 
 [P20] rtl/core/px_core.sv tb_core
-- assign ex_hold = wb_wait || (ex_mem_go && !data_gnt_i) || div_wait;
-+ assign ex_hold = wb_wait || div_wait;
+- assign hold_grant = ex_mem_go && (dreq_gate || !data_gnt_i);
++ assign hold_grant = ex_mem_go && dreq_gate;
+# (retargeted to the step 2.2b lines, D-033: same bug)
 # EX does not wait for the data grant (request dropped, instruction lost)
 
 # ------------------------------------------------------------------ px_if_stage
@@ -596,8 +601,9 @@
 # no MUL-use stall: the consumer reads the result before it exists (forwarded too early)
 
 [I02] rtl/core/px_core.sv tb_core
-- .kill_i  (wb_bus_err),
+- .kill_i  (wb_bus_err || irq_go),
 + .kill_i  (1'b0),
+# (retargeted to the step 2.2b lines, D-033: same bug)
 # kill input tied off: after a flush the divider keeps running for one cycle until valid_i
 # falls (no architectural effect in Phase 1; caught by the tb_core divider monitor). Phase 2
 # interrupt entry needs kill_i, because the divide may still look valid in that cycle.
@@ -628,8 +634,9 @@
 # DIV/DIVU not recognized as divides (only REM/REMU run the divider)
 
 [P21] rtl/core/px_core.sv tb_core
-- assign trap_tval_o  = wb_bus_err ? wb_addr_q : ex_tval;
-+ assign trap_tval_o  = wb_bus_err ? {wb_addr_q[31:2], 2'b00} : ex_tval;
+- assign trap_tval_o  = wb_bus_err ? wb_addr_q : irq_take ? 32'd0 : ex_tval;
++ assign trap_tval_o  = wb_bus_err ? {wb_addr_q[31:2], 2'b00} : irq_take ? 32'd0 : ex_tval;
+# (retargeted to the step 2.2b lines, D-033: same bug)
 # load/store access-fault mtval loses the byte offset (the bus request is word aligned);
 # survived every bench until t06 cases 14-15 (pre-Phase 2 audit)
 
@@ -804,3 +811,75 @@
 - else if (imm12 == IMM_CLZ)   d.alu_op = ALU_CLZ;
 + else if (imm12 == IMM_CLZ)   begin d.alu_op = ALU_CLZ; d.rs1_used = 1'b0; end
 # CLZ not marked as reading rs1: no load-use stall, it reads a stale register (t15 test 56)
+
+# ------------------------------------------------------------------ interrupt take point (step 2.2b, D-033)
+[Q01] rtl/core/px_core.sv tb_core
+- assign irq_go     = irq_elig && !wb_bus_err && !hold_older && !dreq_pend_q;
++ assign irq_go     = irq_elig && !wb_bus_err && !dreq_pend_q;
+# take while an older access in WB still waits for its response
+
+[Q02] rtl/core/px_core.sv tb_core
+- assign irq_go     = irq_elig && !wb_bus_err && !hold_older && !dreq_pend_q;
++ assign irq_go     = irq_elig && !wb_bus_err && !hold_older;
+# take while a data request raised in the previous cycle is still ungranted (OBI: dropped)
+
+[Q03] rtl/core/px_core.sv tb_core
+- assign data_req_o   = ex_mem_go && !wb_wait && !wb_bus_err && !dreq_gate;
++ assign data_req_o   = ex_mem_go && !wb_wait && !wb_bus_err;
+# a new data request is raised while an interrupt is eligible
+
+[Q04] rtl/core/px_core.sv tb_core
+- .kill_i  (wb_bus_err || irq_go),
++ .kill_i  (wb_bus_err),
+# an interrupt take does not kill the running divide
+
+[Q05] rtl/core/px_core.sv tb_core
+- .en_i    (ex_to_wb && ex_is_mul),
++ .en_i    ((ex_to_wb || irq_take) && ex_is_mul),
+# multiplier stage 1 loaded in the take cycle
+
+[Q06] rtl/core/px_core.sv tb_core
+- assign csr_commit  = ex_to_wb && ex_dec_q.csr_en;
++ assign csr_commit  = (ex_to_wb || (irq_take && ex_valid_q && !ex_exc)) && ex_dec_q.csr_en;
+# a CSR write commits in the take cycle (the instruction is killed and runs again)
+
+[Q07] rtl/core/px_core.sv tb_core
+- assign mret_commit = ex_to_wb && ex_dec_q.is_mret;
++ assign mret_commit = (ex_to_wb || (irq_take && ex_valid_q && !ex_exc)) && ex_dec_q.is_mret;
+# an MRET commits in the take cycle
+
+[Q08] rtl/core/px_core.sv tb_core
+- assign irq_epc = ex_valid_q ? ex_pc_q : id_valid_q ? id_pc_q : if_pc;
++ assign irq_epc = ex_valid_q ? ex_pc_q : if_pc;
+# mepc skips the instruction in ID when EX is empty
+
+[Q09] rtl/core/px_core.sv tb_core equivalent
+- assign ex_redirect = ex_valid_q && !(hold_older || hold_div) && !wb_bus_err && !irq_go &&
++ assign ex_redirect = ex_valid_q && !ex_hold && !wb_bus_err && !irq_go &&
+# equivalent: the EX redirect waits for the data grant again (audit B-01 reverted). Proven
+# redundant for every reachable state by tb/formal/px_core_b01.sby (property P2)
+
+[Q10] rtl/core/px_core.sv tb_core
+- .trap_irq_i   (trap_irq_o),
++ .trap_irq_i   (1'b0),
+# mcause of an interrupt without the interrupt bit
+
+[Q11] rtl/core/px_core.sv tb_core
+- assign irq_elig   = irq_req_i && csr_mie;
++ assign irq_elig   = irq_req_i;
+# interrupts taken while mstatus.MIE = 0
+
+[Q12] rtl/core/px_core.sv tb_core
+- assign irq_take   = irq_go && !(ex_valid_q && ex_exc);
++ assign irq_take   = irq_go;
+# an interrupt preempts a synchronous exception in EX
+
+[Q13] rtl/core/px_core.sv tb_core
+- end else if (wb_bus_err || ex_redirect || id_redirect || irq_go) begin
++ end else if (wb_bus_err || ex_redirect || id_redirect) begin
+# the take does not flush ID (a younger instruction runs before the handler)
+
+[Q14] rtl/core/px_core.sv tb_core
+- assign trap_pc_o    = wb_bus_err ? wb_pc_q : irq_take ? irq_epc : ex_pc_q;
++ assign trap_pc_o    = wb_bus_err ? wb_pc_q : ex_pc_q;
+# mepc of an interrupt is always the EX pc, even when EX is empty
