@@ -216,6 +216,7 @@ module tb_core #(
   bit          irq_wait_ex;        // a take happened, waiting for the handler in EX
   logic [31:0] irq_target;
   int          n_irqs, total_irqs, lat_checked, lat_min, lat_max;
+  int          run_lat_n, run_lat_min, run_lat_max, run_lat_exact;   // per run
   // coverage of the take point: EX contents at the take, divider cycle at the take
   // 0 nothing in ID/EX, 1 ID only, 2 other instruction in EX, 3 load, 4 store, 5 MUL, 6 DIV,
   // 7 CSR instruction, 8 MRET, 9 taken branch, 10 JALR, 11 FENCE.I, 12 JAL in ID
@@ -574,6 +575,10 @@ module tb_core #(
         lat_checked++;
         if (lat < lat_min) lat_min = lat;
         if (lat > lat_max) lat_max = lat;
+        run_lat_n++;
+        if (lat < run_lat_min) run_lat_min = lat;
+        if (lat > run_lat_max) run_lat_max = lat;
+        if (mode == MODE_IDEAL && irq_lat_exp != 0 && lat == irq_lat_exp) run_lat_exact++;
       end
     end
   end
@@ -682,6 +687,7 @@ module tb_core #(
     end
     ref_checked = 0;
     n_irqs = 0; irq_wait_ex = 1'b0;
+    run_lat_n = 0; run_lat_min = 1 << 30; run_lat_max = 0; run_lat_exact = 0;
     begin
       int tfd;
       ref_traps = -1;
@@ -810,6 +816,9 @@ module tb_core #(
     $display("%-6s %-22s %-6s seed %08h  %0d retired, %0d cycles, %0d traps, %0d interrupts, %0d timing marks, %0d cycle checks",
              errors_run == 0 ? "ok" : "FAILED", name, mname, seed_i, retired, cycle, n_traps,
              n_irqs, marks_checked, cyc_checked);
+    if (run_lat_n != 0)
+      $display("       interrupt latency %0d-%0d cycles over %0d takes; %0d exactly as declared (ideal mode)",
+               run_lat_min, run_lat_max, run_lat_n, run_lat_exact);
   endtask
 
   bit stop_on_fail;
