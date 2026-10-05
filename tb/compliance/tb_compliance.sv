@@ -78,12 +78,13 @@ module tb_compliance;
     .data_req_o(d_req), .data_gnt_i(d_gnt), .data_addr_o(d_addr), .data_we_o(d_we),
     .data_be_o(d_be), .data_wdata_o(d_wdata), .data_rvalid_i(d_rvalid),
     .data_rdata_i(d_rdata), .data_err_i(d_err),
+    .irq_req_i(1'b0), .irq_id_i(6'd0), .irq_ack_o(), .irq_ack_id_o(),   // no interrupt source (D-033)
     .rvfi_valid_o(r_valid), .rvfi_pc_o(r_pc), .rvfi_insn_o(r_insn),
     .rvfi_rd_addr_o(r_rd), .rvfi_rd_wdata_o(r_rd_wdata), .rvfi_mem_addr_o(r_mem_addr),
     .rvfi_mem_rmask_o(r_rmask), .rvfi_mem_wmask_o(r_wmask),
     .rvfi_mem_rdata_o(r_mem_rdata), .rvfi_mem_wdata_o(r_mem_wdata),
     .rvfi_csr_we_o(r_csr_we), .rvfi_csr_addr_o(r_csr_addr), .rvfi_csr_wdata_o(r_csr_wdata),
-    .trap_valid_o(t_valid), .trap_cause_o(t_cause), .trap_pc_o(t_pc), .trap_tval_o(t_tval)
+    .trap_valid_o(t_valid), .trap_irq_o(), .trap_cause_o(t_cause), .trap_pc_o(t_pc), .trap_tval_o(t_tval)
   );
 
   function automatic bit in_mem(input logic [31:0] a);

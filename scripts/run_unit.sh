@@ -38,6 +38,20 @@ fi
 grep -v '^VCD info' "$LOG"
 
 if grep -q '^PASS' "$LOG" && ! grep -Eq '^(FAIL|ERROR|FATAL|TIMEOUT)([ :]|$)' "$LOG"; then
+  # Post-checks: each "# post_check: <command>" line of the source list runs after a passing
+  # simulation and must exit 0 (tb_core: px_iss.py --replay of the interrupt runs, D-033).
+  # $PY in the command is the project's Python.
+  PY="${LOCALAPPDATA:-}/Programs/Python/Python312/python.exe"
+  [ -x "$PY" ] || PY="$(command -v python3 || command -v python || true)"
+  while read -r cmd; do
+    [ -n "$cmd" ] || continue
+    if ! eval "$cmd" >> "$LOG" 2>&1; then
+      grep -E '^(FAIL|ERROR)' "$LOG" | tail -12
+      echo "FAIL $TB: post_check failed: $cmd" | tee -a "$LOG"
+      exit 1
+    fi
+    grep -E '^PASS' "$LOG" | tail -1
+  done < <(sed -n 's/^# post_check: *//p' "$FLIST")
   exit 0
 fi
 exit 1

@@ -133,8 +133,15 @@ def compile_tb(tb, mutated_rel, mutated_abs, work):
     return vvp, []
 
 
-def simulate(vvp, limit):
-    """('pass'|'fail'|'wallclock', output, seconds)."""
+def post_checks(fl):
+    """'# post_check: <command>' lines of a source list ($PY = this Python), as run_unit.sh."""
+    return [ln.split(":", 1)[1].strip().replace('"$PY"', f'"{sys.executable}"').replace("$PY", f'"{sys.executable}"')
+            for ln in fl.read_text().splitlines() if ln.startswith("# post_check:")]
+
+
+def simulate(vvp, limit, posts=()):
+    """('pass'|'fail'|'wallclock', output, seconds). A passing simulation must also pass the
+    source list's post-checks (D-033: tb_core's interrupt runs replayed by px_iss)."""
     t0 = time.monotonic()
     try:
         r = subprocess.run([VVP, "-n", str(vvp), "+stop_on_fail"], cwd=ROOT,
@@ -144,6 +151,12 @@ def simulate(vvp, limit):
     out = r.stdout + r.stderr
     passed = (r.returncode == 0 and re.search(r"^PASS", out, re.M)
               and not re.search(r"^(FAIL|ERROR|FATAL|TIMEOUT)([ :]|$)", out, re.M))
+    if passed:
+        for cmd in posts:
+            p = subprocess.run(cmd, cwd=ROOT, shell=True, capture_output=True, text=True)
+            if p.returncode != 0:
+                out += p.stdout + p.stderr + f"\nFAIL post_check: {cmd}\n"
+                return "fail", out, time.monotonic() - t0
     return ("pass" if passed else "fail"), out, time.monotonic() - t0
 
 
@@ -158,7 +171,7 @@ def baseline(tb):
         vvp, err = compile_tb(tb, None, None, work)
         if vvp is None:
             raise SystemExit(f"baseline {tb} does not compile: {err}")
-        st, out, sec = simulate(vvp, timeout_of(flist(tb)))
+        st, out, sec = simulate(vvp, timeout_of(flist(tb)), post_checks(flist(tb)))
         if st != "pass":
             print(f"ERROR: unmutated baseline {tb} did not pass ({st}):", flush=True)
             print("\n".join(out.splitlines()[-5:]), flush=True)
@@ -177,7 +190,7 @@ def run_tb(tb, mutated_rel, mutated_abs, work):
     vvp, err = compile_tb(tb, mutated_rel, mutated_abs, work)
     if vvp is None:
         return "invalid", err
-    st, out, sec = simulate(vvp, limit)
+    st, out, sec = simulate(vvp, limit, post_checks(fl))
     if st == "pass":
         return "pass", []
     if st == "fail":
@@ -188,11 +201,11 @@ def run_tb(tb, mutated_rel, mutated_abs, work):
     if status:
         return status, [diag[0] + "  (printed before the wall-clock limit)"]
     base_vvp, _ = baseline(tb)
-    bst, _, bsec = simulate(base_vvp, limit)
+    bst, _, bsec = simulate(base_vvp, limit, post_checks(fl))
     if bst != "pass":
         return "inconclusive", [f"wall-clock limit {limit} s; the unmutated baseline also "
                                 f"failed to finish ({bst}, {bsec:.0f} s): machine load"]
-    st, out, sec = simulate(vvp, 4 * limit)
+    st, out, sec = simulate(vvp, 4 * limit, post_checks(fl))
     if st == "pass":
         return "pass", [f"passed on recheck with a {4 * limit} s limit"]
     status, diag = classify_output(out)

@@ -64,8 +64,21 @@ fault on the second half of a 32-bit instruction, the address of that half (pc +
 as the privileged manual requires for variable-length instructions; pc for EBREAK;
 the instruction bits (16-bit ones zero-extended) for illegal instructions; 0 for ECALL.
 
+Interrupts (Phase 2 step 2.2b, DECISIONS.md D-033; PHASE2_VERIFICATION.md § 3.3, schedule
+replay): the time of an interrupt depends on memory timing, so the model cannot predict it.
+`--replay <manifest>` re-executes every run listed by tb_core (one event log per run: R a
+retirement, T an exception, I an interrupt with its id and the pc the core saved, E the
+totals) and takes each interrupt at the recorded instruction boundary. At that boundary it
+checks independently that the interrupt was allowed (mstatus.MIE = 1) and that the core's
+saved pc is the model's next pc, then enters the trap as the privileged manual specifies for
+an interrupt: mepc = the next pc, mcause = interrupt bit and the code (the interrupt id; the
+D-022 mcause keeps code bits [4:0]), mtval = 0, MPIE = MIE, MIE = 0, pc = mtvec BASE. Every
+retirement and exception before and after is compared with the model as for a static
+reference (same fields, same care masks), and the log must end with the tohost store.
+
 Usage: python scripts/px_iss.py <prefix> [max_steps]
        reads <prefix>.itcm.hex and <prefix>.dtcm.hex
+       python scripts/px_iss.py --replay <manifest>    (tb_core interrupt runs)
 """
 
 import sys
@@ -232,6 +245,10 @@ class Machine:
         self.mtval = tval & M32
         self.mpie, self.mie = self.mie, 0
         self.pc = self.mtvec & ~3
+
+    def take_interrupt(self, code):
+        """Interrupt entry before the instruction at self.pc (it does not execute)."""
+        self.take_trap(self.pc, (1 << 31) | (code & 0x1F), 0)
 
     # ------------------------------------------------------------------ memory
     def region(self, addr):
@@ -626,7 +643,101 @@ def load_hex(path):
     return out
 
 
+def replay_run(ev_path, prefix):
+    """Check one tb_core event log against the model. Returns (errors, summary)."""
+    m = Machine(load_hex(prefix + ".itcm.hex"), load_hex(prefix + ".dtcm.hex"))
+    lines = Path(ev_path).read_text().splitlines()
+    if not lines or not lines[-1].startswith("E "):
+        return [f"{ev_path}: incomplete event log (no E line)"], ""
+    n_r = n_t = n_i = 0
+    last_store_tohost = False
+    errs = []
+    for k, ln in enumerate(lines[:-1], 1):
+        f = ln.split()
+        where = f"{ev_path}:{k}"
+        try:
+            if f[0] == "I":
+                code, epc = int(f[1]), int(f[2], 16)
+                if m.mie != 1:
+                    errs.append(f"{where}: interrupt taken while mstatus.MIE = 0 (pc {m.pc:08x})")
+                if epc != m.pc:
+                    errs.append(f"{where}: interrupt saved pc {epc:08x}, model next pc {m.pc:08x}")
+                m.take_interrupt(code)
+                n_i += 1
+                last_store_tohost = False
+                continue
+            kind, r = m.step()
+        except Nondeterministic as e:
+            errs.append(f"{where}: {e}")
+            break
+        if f[0] == "T":
+            n_t += 1
+            got = (int(f[1]), int(f[2], 16), int(f[3], 16))
+            if kind != "trap" or r != got:
+                errs.append(f"{where}: exception {got[0]} pc {got[1]:08x} tval {got[2]:08x}; model {kind} {r if kind == 'trap' else '%08x' % r[0]}")
+            last_store_tohost = False
+        elif f[0] == "R":
+            n_r += 1
+            pc, insn, rd, wd, ma = int(f[1], 16), int(f[2], 16), int(f[3]), int(f[4], 16), int(f[5], 16)
+            rm, wm, md = int(f[6], 16), int(f[7], 16), int(f[8], 16)
+            cw, ca, cd = int(f[9]), int(f[10], 16), int(f[11], 16)
+            if kind != "retire":
+                errs.append(f"{where}: retirement pc {pc:08x}; model trap {r}")
+            else:
+                (e_pc, e_insn, e_rd, e_wd, e_ma, e_rm, e_wm, e_md, e_care, e_cw, e_ca, e_cd,
+                 e_ccare) = r
+                lm = sum(0xFF << (8 * b) for b in range(4) if (rm | wm) >> b & 1)
+                bad = (pc != e_pc or insn != e_insn or rd != e_rd or (wd & e_care) != (e_wd & e_care)
+                       or rm != e_rm or wm != e_wm
+                       or ((rm | wm) and (ma != e_ma or (md & lm & e_care) != (e_md & lm & e_care))))
+                if not bad and (cw != e_cw or (e_cw and (ca != e_ca or (cd & e_ccare) != (e_cd & e_ccare)))):
+                    bad = True
+                if bad:
+                    errs.append(f"{where}: retirement pc {pc:08x} insn {insn:08x} x{rd}={wd:08x} mem {ma:08x} r{rm:x} w{wm:x} {md:08x} csr {cw} {ca:03x}={cd:08x}; "
+                                f"model pc {e_pc:08x} insn {e_insn:08x} x{e_rd}={e_wd:08x} mem {e_ma:08x} r{e_rm:x} w{e_wm:x} {e_md:08x} csr {e_cw} {e_ca:03x}={e_cd:08x}")
+                last_store_tohost = bool(e_wm) and e_ma == TOHOST
+        else:
+            errs.append(f"{where}: unknown event {f[0]}")
+        if len(errs) >= 10:
+            break
+    totals = [int(x) for x in lines[-1].split()[1:4]]
+    if not errs and totals != [n_r, n_t, n_i]:
+        errs.append(f"{ev_path}: totals {totals} differ from the events ({n_r}, {n_t}, {n_i})")
+    if not errs and not last_store_tohost:
+        errs.append(f"{ev_path}: the log does not end with the tohost store")
+    return errs, f"{n_r} retirements, {n_t} exceptions, {n_i} interrupts"
+
+
+def replay(manifest):
+    lines = Path(manifest).read_text().splitlines()
+    runs = [ln.split() for ln in lines if ln.startswith("run ")]
+    if not lines or not lines[-1].startswith("end ") or int(lines[-1].split()[1]) != len(runs):
+        print(f"FAIL replay: {manifest} is incomplete (the bench did not finish)")
+        return 1
+    bad = 0
+    tot = [0, 0, 0]
+    for _, ev, name, mode, seed in runs:
+        errs, summ = replay_run(ev, str(Path("tb/core/programs") / name))
+        if errs:
+            bad += 1
+            print(f"FAIL replay {name} {mode} {seed}")
+            for e in errs:
+                print("  " + e)
+        else:
+            print(f"ok   replay {name} {mode} {seed}: {summ}")
+            for k, v in enumerate(int(x) for x in summ.split()[::2]):
+                tot[k] += v
+    if bad:
+        print(f"FAIL replay: {bad} of {len(runs)} runs differ from the model")
+        return 1
+    print(f"PASS replay: {len(runs)} runs, {tot[0]} retirements, {tot[1]} exceptions, "
+          f"{tot[2]} interrupts matched the model")
+    return 0
+
+
 def main():
+    if len(sys.argv) > 2 and sys.argv[1] == "--replay":
+        sys.exit(replay(sys.argv[2]))
     prefix = sys.argv[1]
     max_steps = int(sys.argv[2]) if len(sys.argv) > 2 else 2_000_000
     m = Machine(load_hex(prefix + ".itcm.hex"), load_hex(prefix + ".dtcm.hex"))

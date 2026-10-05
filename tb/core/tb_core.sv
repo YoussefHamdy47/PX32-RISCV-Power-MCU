@@ -51,6 +51,27 @@
 //     request while reset is asserted
 //   - no X on control outputs; the trace never shows x0 written with a nonzero value
 //
+// Interrupt test input (step 2.2b, DECISIONS.md D-033)
+//   A retired word store to IRQTRIG (0x2000_FFD0) arms a model of the interrupt
+//   controller's two flops: after [15:0] cycles (plus a seeded random 0-15 if bit 31 is
+//   set) the pending flop is set (cycle 0), the request irq_req_i follows one edge later,
+//   and both stay set until the core acknowledges a take (irq_ack_o). [21:16] is the id,
+//   [27:24] the expected latency in ideal mode (0: not checked). One trigger at a time.
+//   Monitors, every run:
+//   - a take only while irq_req_i is high and mstatus.MIE is 1; no CSR commit, MRET, data
+//     request, multiplier stage-1 load or divide completion in the take cycle
+//   - latency (pending flop to the handler's first instruction in EX): exactly the declared
+//     value in ideal mode, at least 4 in every mode; every cycle in which the request is
+//     eligible but not taken has one of the excluded causes (WB bus error, older access in
+//     WB, ungranted request from the previous cycle, exception in EX)
+//   - coverage of the take point (EX contents and divider cycle at the take), reported;
+//     every bin must be hit when interrupt programs ran in ideal mode
+//   Programs with <name>.replay (built with "px-build: irq") have no static reference:
+//   the bench writes every retirement, exception and interrupt of each run in program order
+//   to sim/logs/replay_<NAME>_<run>.ev and lists the runs in sim/logs/replay_<NAME>.manifest;
+//   the source list's post_check (scripts/px_iss.py --replay) re-executes them with the
+//   recorded interrupts. Their trap table lists exceptions only.
+//
 // Run: scripts/run_unit.sh tb_core tb/core/tb_core.f   (+only=<program>, +vcd)
 
 `timescale 1ns/1ps
@@ -70,6 +91,7 @@ module tb_core #(
   localparam logic [31:0] CYCEXP    = 32'h2000_FFE4;
   localparam logic [31:0] CYCCHK    = 32'h2000_FFE8;
   localparam logic [31:0] TRAPTAB   = 32'h2000_F000;
+  localparam logic [31:0] IRQTRIG   = 32'h2000_FFD0;
   localparam logic [31:0] TRAPVEC   = 32'h1000_0040;
   localparam int          MAX_CYCLES = 400000;
   localparam int          QDEPTH    = 8;
@@ -100,9 +122,11 @@ module tb_core #(
   logic [31:0] r_csr_wdata;
   logic [4:0]  r_rd;
   logic [3:0]  r_rmask, r_wmask;
-  logic        t_valid;
+  logic        t_valid, t_irq;
   logic [4:0]  t_cause;
   logic [31:0] t_pc, t_tval;
+  logic        irq_req, irq_ack;
+  logic [5:0]  irq_id, irq_ack_id;
 
   px_core #(.BOOT_ADDR(ITCM_BASE), .MTVEC_RESET(TRAPVEC)) dut (
     .clk_i(clk), .rst_ni(rst_n),
@@ -111,6 +135,8 @@ module tb_core #(
     .data_req_o(d_req), .data_gnt_i(d_gnt), .data_addr_o(d_addr), .data_we_o(d_we),
     .data_be_o(d_be), .data_wdata_o(d_wdata), .data_rvalid_i(d_rvalid),
     .data_rdata_i(d_rdata), .data_err_i(d_err),
+    .irq_req_i(irq_req), .irq_id_i(irq_id), .irq_ack_o(irq_ack), .irq_ack_id_o(irq_ack_id),
+    .trap_irq_o(t_irq),
     .rvfi_valid_o(r_valid), .rvfi_pc_o(r_pc), .rvfi_insn_o(r_insn),
     .rvfi_rd_addr_o(r_rd), .rvfi_rd_wdata_o(r_rd_wdata), .rvfi_mem_addr_o(r_mem_addr),
     .rvfi_mem_rmask_o(r_rmask), .rvfi_mem_wmask_o(r_wmask),
@@ -178,6 +204,25 @@ module tb_core #(
   int          ref_checked;
   int          ref_traps;          // trap count in the reference list (-1: unknown)
   int          last_retire;
+
+  // Interrupt test input and replay (D-033)
+  bit          replay;             // this program is checked by px_iss --replay
+  int          ev_fd, man_fd, replay_runs;
+  bit          irq_armed, irq_pend;
+  int          irq_cnt;            // cycles until the pending flop is set
+  int          irq_t0;             // edge at which the pending flop was set
+  int          irq_lat_exp;        // declared latency (ideal mode), 0 = not checked
+  logic [5:0]  irq_trig_id;
+  bit          irq_wait_ex;        // a take happened, waiting for the handler in EX
+  logic [31:0] irq_target;
+  int          n_irqs, total_irqs, lat_checked, lat_min, lat_max;
+  // coverage of the take point: EX contents at the take, divider cycle at the take
+  // 0 nothing in ID/EX, 1 ID only, 2 other instruction in EX, 3 load, 4 store, 5 MUL, 6 DIV,
+  // 7 CSR instruction, 8 MRET, 9 taken branch, 10 JALR, 11 FENCE.I, 12 JAL in ID
+  localparam int COV_EX = 13;
+  int          cov_ex [COV_EX];
+  int          cov_div [1:17];
+  bit          irq_ideal_seen;
 
   // OBI stability tracking
   bit          i_pend, d_pend;
@@ -333,6 +378,44 @@ module tb_core #(
     if (!rst_n && (i_req || d_req)) run_error("request while reset is asserted");
 
   // ---------------------------------------------------------------------------
+  // Interrupt test input (D-033): a model of the interrupt controller's pending flop and
+  // registered request, armed by a retired word store to IRQTRIG. `cycle` (old value) is
+  // the number of the current edge.
+  // ---------------------------------------------------------------------------
+  always @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+      irq_pend  <= 1'b0;
+      irq_req   <= 1'b0;
+      irq_id    <= 6'd0;
+      irq_armed = 1'b0;
+    end else begin
+      if (irq_ack) begin
+        irq_pend <= 1'b0;
+        irq_req  <= 1'b0;
+      end else begin
+        irq_req <= irq_pend;
+        if (irq_armed) begin
+          if (irq_cnt == 0) begin
+            irq_pend  <= 1'b1;
+            irq_armed = 1'b0;
+            irq_t0    = cycle;
+          end else
+            irq_cnt = irq_cnt - 1;
+        end
+      end
+      if (r_valid && r_wmask == 4'b1111 && r_mem_addr == IRQTRIG && !tohost_retired) begin
+        if (irq_armed || irq_pend || irq_req)
+          run_error("interrupt trigger while the previous one is still pending");
+        irq_armed   = 1'b1;
+        irq_cnt     = int'(r_mem_wdata[15:0]) + (r_mem_wdata[31] ? int'($urandom(seed) % 16) : 0);
+        irq_id      <= r_mem_wdata[21:16];
+        irq_trig_id = r_mem_wdata[21:16];
+        irq_lat_exp = int'(r_mem_wdata[27:24]);
+      end
+    end
+  end
+
+  // ---------------------------------------------------------------------------
   // Retirement and trap monitors
   // ---------------------------------------------------------------------------
   task automatic check_ref();
@@ -379,7 +462,12 @@ module tb_core #(
         last_retire = cycle;
         if (!tohost_retired) begin
           retired++;
-          check_ref();
+          if (replay && ev_fd != 0)
+            $fwrite(ev_fd, "R %08h %08h %0d %08h %08h %h %h %08h %0d %03h %08h\n", r_pc, r_insn, r_rd,
+                    r_rd_wdata, r_mem_addr, r_rmask, r_wmask,
+                    (r_rmask != 4'd0) ? r_mem_rdata : r_mem_wdata, r_csr_we, r_csr_addr, r_csr_wdata);
+          else
+            check_ref();
         end
         if (r_wmask != 4'd0 && r_mem_addr == TOHOST && !tohost_retired) begin
           tohost_retired = 1'b1;
@@ -418,16 +506,74 @@ module tb_core #(
         run_error("CSR commit, MRET or multiply/divide completion in the same cycle as a trap");
       if (dut.div_busy && !(dut.ex_valid_q && dut.ex_is_div))
         run_error("divider running without a divide in EX");
-      if (t_valid && !tohost_retired && ref_traps >= 0 && n_traps >= ref_traps)
+      if (t_valid && !t_irq && !tohost_retired && ref_traps >= 0 && n_traps >= ref_traps)
         run_error($sformatf("trap %0d (cause %0d pc %08h) beyond the %0d traps of the reference model",
                             n_traps + 1, t_cause, t_pc, ref_traps));
-      if (t_valid && !tohost_retired) begin
+      if (t_valid && !t_irq && !tohost_retired) begin
         if (n_traps < MAXTRAPS) begin
           trap_cause_log[n_traps] = t_cause;
           trap_pc_log[n_traps]    = t_pc;
           trap_tval_log[n_traps]  = t_tval;
         end
         n_traps++;
+        if (replay && ev_fd != 0) $fwrite(ev_fd, "T %0d %08h %08h\n", t_cause, t_pc, t_tval);
+      end
+
+      // ---- interrupt take point (D-033) ----
+      if (t_irq !== irq_ack) run_error("trap_irq_o and irq_ack_o differ");
+      if (irq_ack) begin
+        if (!irq_req || !dut.csr_mie)
+          run_error("interrupt taken without an eligible request");
+        if (irq_ack_id !== irq_id) run_error("acknowledged id differs from the request");
+        if (!t_valid || t_cause !== irq_id[4:0] || t_tval !== 32'd0)
+          run_error($sformatf("take reported as valid %b cause %0d tval %08h", t_valid, t_cause, t_tval));
+        if (dut.csr_commit || dut.mret_commit || d_req || dut.u_mul.en_i ||
+            dut.div_accept)
+          run_error("CSR commit, MRET, data request, multiply or divide completion in a take cycle");
+        // coverage
+        if (dut.ex_valid_q) begin
+          if (dut.ex_is_div) begin
+            cov_ex[6]++;
+            cov_div[dut.u_div.active_q ? int'(dut.u_div.cnt_q) + 1 : 1]++;
+          end
+          else if (dut.ex_is_mul)              cov_ex[5]++;
+          else if (dut.ex_dec_q.is_load)       cov_ex[3]++;
+          else if (dut.ex_dec_q.is_store)      cov_ex[4]++;
+          else if (dut.ex_dec_q.csr_en)        cov_ex[7]++;
+          else if (dut.ex_dec_q.is_mret)       cov_ex[8]++;
+          else if (dut.br_taken)               cov_ex[9]++;
+          else if (dut.ex_dec_q.is_jalr)       cov_ex[10]++;
+          else if (dut.ex_dec_q.is_fence_i)    cov_ex[11]++;
+          else                                 cov_ex[2]++;
+        end else if (dut.id_valid_q)           cov_ex[1]++;
+        else                                   cov_ex[0]++;
+        if (dut.id_valid_q && dut.dec.is_jal)  cov_ex[12]++;
+        if (mode == MODE_IDEAL) irq_ideal_seen = 1'b1;
+        if (!tohost_retired) begin
+          n_irqs++;
+          if (replay && ev_fd != 0) $fwrite(ev_fd, "I %0d %08h\n", irq_id, t_pc);
+        end
+        irq_wait_ex = 1'b1;
+        irq_target  = dut.csr_mtvec;
+      end else if (irq_req && dut.csr_mie &&
+                   !(dut.wb_bus_err || dut.hold_older || dut.dreq_pend_q ||
+                     (dut.ex_valid_q && dut.ex_exc)))
+        run_error("eligible interrupt not taken, and no excluded condition holds");
+      if (irq_wait_ex && !irq_ack && dut.ex_valid_q) begin
+        int lat;
+        irq_wait_ex = 1'b0;
+        lat = cycle - 1 - irq_t0;          // EX was loaded at the previous edge
+        if (dut.ex_pc_q !== irq_target)
+          run_error($sformatf("first instruction in EX after a take at %08h, handler at %08h",
+                              dut.ex_pc_q, irq_target));
+        if (lat < 4)
+          run_error($sformatf("interrupt latency %0d cycles, below the minimum of 4", lat));
+        if (mode == MODE_IDEAL && irq_lat_exp != 0 && lat != irq_lat_exp)
+          run_error($sformatf("interrupt latency %0d cycles, expected %0d (handler %08h)",
+                              lat, irq_lat_exp, irq_target));
+        lat_checked++;
+        if (lat < lat_min) lat_min = lat;
+        if (lat > lat_max) lat_max = lat;
       end
     end
   end
@@ -516,9 +662,26 @@ module tb_core #(
     // (a ternary between strings inside the concatenation crashes Icarus 12)
     if (mode == MODE_IDEAL) trace_fd = $fopen({"sim/logs/core_", name, ".trace"}, "w");
     else                    trace_fd = 0;
-    ref_fd = $fopen({"tb/core/programs/", name, ".trace.ref"}, "r");
-    if (ref_fd == 0) run_error({"missing reference trace for ", name});
+    // Interrupt programs (D-033) are checked by px_iss --replay from an event log instead
+    // of a static reference.
+    begin
+      int rfd2;
+      rfd2   = $fopen({"tb/core/programs/", name, ".replay"}, "r");
+      replay = (rfd2 != 0);
+      if (rfd2 != 0) $fclose(rfd2);
+    end
+    if (ev_fd != 0) $fclose(ev_fd);
+    ev_fd = 0;
+    if (replay) begin
+      ref_fd = 0;
+      ev_fd  = $fopen($sformatf("sim/logs/replay_%s_%0d.ev", NAME, replay_runs), "w");
+      if (ev_fd == 0) run_error("cannot write the replay event log");
+    end else begin
+      ref_fd = $fopen({"tb/core/programs/", name, ".trace.ref"}, "r");
+      if (ref_fd == 0) run_error({"missing reference trace for ", name});
+    end
     ref_checked = 0;
+    n_irqs = 0; irq_wait_ex = 1'b0;
     begin
       int tfd;
       ref_traps = -1;
@@ -592,6 +755,17 @@ module tb_core #(
     else if (tohost_val != 32'd1)
       run_error($sformatf("program reported failure in test %0d", (tohost_val >> 1) - 1));
 
+    // replay runs: close the event log (its last line states the totals) and list the run
+    if (replay && ev_fd != 0) begin
+      $fwrite(ev_fd, "E %0d %0d %0d\n", retired, n_traps, n_irqs);
+      $fclose(ev_fd);
+      ev_fd = 0;
+      $fwrite(man_fd, "run sim/logs/replay_%s_%0d.ev %s %s %08h\n", NAME, replay_runs, name, mname, seed_i);
+      replay_runs++;
+    end
+    total_irqs += n_irqs;
+    if (irq_wait_ex) run_error("an interrupt was taken but its handler never reached EX");
+
     // reference trace fully consumed (it ends with the tohost store)
     if (ref_fd != 0) begin
       logic [31:0] dummy;
@@ -613,9 +787,10 @@ module tb_core #(
                             trap_cause_log[k], trap_pc_log[k], trap_tval_log[k],
                             exp_tab[3*k], exp_tab[3*k + 1], exp_tab[3*k + 2]));
     end
-    // ... and the reference model's list
-    rfd = $fopen({"tb/core/programs/", name, ".traps.ref"}, "r");
-    if (rfd == 0) run_error({"missing reference trap list for ", name});
+    // ... and the reference model's list (replay runs: px_iss --replay checks every trap)
+    rfd = replay ? 0 : $fopen({"tb/core/programs/", name, ".traps.ref"}, "r");
+    if (replay) ;
+    else if (rfd == 0) run_error({"missing reference trap list for ", name});
     else begin
       rn = $fscanf(rfd, "%d\n", ref_n);
       if (rn != 1 || ref_n != n_traps)
@@ -632,9 +807,9 @@ module tb_core #(
 
     runs++;
     total_errors += errors_run;
-    $display("%-6s %-22s %-6s seed %08h  %0d retired, %0d cycles, %0d traps, %0d timing marks, %0d cycle checks",
+    $display("%-6s %-22s %-6s seed %08h  %0d retired, %0d cycles, %0d traps, %0d interrupts, %0d timing marks, %0d cycle checks",
              errors_run == 0 ? "ok" : "FAILED", name, mname, seed_i, retired, cycle, n_traps,
-             marks_checked, cyc_checked);
+             n_irqs, marks_checked, cyc_checked);
   endtask
 
   bit stop_on_fail;
@@ -653,7 +828,16 @@ module tb_core #(
       $fatal(1, "no program list");
     end
     rst_n = 1'b0;
-    trace_fd = 0; ref_fd = 0;
+    trace_fd = 0; ref_fd = 0; ev_fd = 0;
+    replay_runs = 0; total_irqs = 0; lat_checked = 0; lat_min = 1 << 30; lat_max = 0;
+    irq_ideal_seen = 1'b0;
+    for (int k = 0; k < COV_EX; k++) cov_ex[k] = 0;
+    for (int k = 1; k <= 17; k++) cov_div[k] = 0;
+    man_fd = $fopen($sformatf("sim/logs/replay_%s.manifest", NAME), "w");
+    if (man_fd == 0) begin
+      $display("FAIL %s (cannot write the replay manifest)", NAME);
+      $fatal(1, "no manifest");
+    end
     // +only=<program> runs a single program (debugging); +vcd dumps a waveform.
     if (!$value$plusargs("only=%s", only)) only = "";
     if ($test$plusargs("vcd")) begin
@@ -677,12 +861,33 @@ module tb_core #(
       end
     end
     $fclose(fd);
+    $fwrite(man_fd, "end %0d\n", replay_runs);
+    $fclose(man_fd);
+    // take-point coverage: every bin once interrupts were taken in ideal mode (D-033)
+    if (irq_ideal_seen) begin
+      int holes;
+      holes = 0;
+      for (int k = 0; k < COV_EX; k++)
+        if (cov_ex[k] == 0) begin holes++; $display("hole: take with EX/ID kind %0d", k); end
+      for (int k = 1; k <= 17; k++)
+        if (cov_div[k] == 0) begin holes++; $display("hole: take at divider cycle %0d", k); end
+      if (holes != 0) begin
+        $display("ERROR %0d interrupt coverage holes", holes);
+        total_errors += holes;
+      end
+    end
     if (runs == 0) begin
       $display("FAIL %s (no programs)", NAME);
       $fatal(1, "no programs");
-    end else if (total_errors == 0)
-      $display("PASS %s (%0d program runs, %0d retirements matched the reference model, %0d data accesses checked exactly once)", NAME, runs, total_ref, xo_checked);
-    else begin
+    end else if (total_errors == 0) begin
+      // (no string ternary inside a concatenation: Icarus 12)
+      if (total_irqs == 0)
+        $display("PASS %s (%0d program runs, %0d retirements matched the reference model, %0d data accesses checked exactly once)", NAME, runs, total_ref, xo_checked);
+      else
+        $display("PASS %s (%0d program runs, %0d retirements matched the reference model, %0d data accesses checked exactly once; %0d interrupts taken, %0d latencies %0d-%0d cycles, take coverage %0d+17 bins; %0d runs for replay)",
+                 NAME, runs, total_ref, xo_checked, total_irqs, lat_checked, lat_min, lat_max,
+                 COV_EX, replay_runs);
+    end else begin
       $display("FAIL %s (%0d errors over %0d runs)", NAME, total_errors, runs);
       $fatal(1, "tb_core failed");
     end

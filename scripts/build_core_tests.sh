@@ -22,11 +22,22 @@ mkdir -p "$OUT" sim/prog
 for src in sw/tests/core/*.S sw/tests/random/*.S sw/tests/random_long/*.S; do
   [ -f "$src" ] || continue
   name="$(basename "$src" .S)"
+  # Interrupt programs (step 2.2b, D-033): crt0 resumes after interrupts, and the boundary
+  # of each take depends on memory timing, so px_iss checks every run afterwards from the
+  # bench's event log (px_iss.py --replay) instead of producing a reference now.
+  irq=""
+  grep -q "px-build: irq" "$src" && irq="-DPX_IRQ_RESUME"
   "$GCC" -march=rv32imc_zicsr_zifencei_zba_zbb_zbs_zicond -mabi=ilp32 -nostdlib -nostartfiles -mno-relax \
-         -T sw/common/link.ld -I sw/common sw/common/crt0.S "$src" -o "sim/prog/$name.elf"
+         $irq -T sw/common/link.ld -I sw/common sw/common/crt0.S "$src" -o "sim/prog/$name.elf"
   "$BIN/riscv-none-elf-objdump" -d -M no-aliases,numeric "sim/prog/$name.elf" > "sim/prog/$name.dis"
   "$PY" scripts/elf2hex.py "sim/prog/$name.elf" "$OUT/$name"
-  "$PY" scripts/px_iss.py "$OUT/$name"
+  if [ -n "$irq" ]; then
+    rm -f "$OUT/$name.trace.ref" "$OUT/$name.traps.ref"
+    printf 'checked by scripts/px_iss.py --replay (interrupt program, D-033)\n' > "$OUT/$name.replay"
+  else
+    rm -f "$OUT/$name.replay"
+    "$PY" scripts/px_iss.py "$OUT/$name"
+  fi
   case "$src" in
     sw/tests/random/*) echo "$name" >> "$OUT/list_random.txt" ;;
     sw/tests/random_long/*) echo "$name" >> "$OUT/list_random_long.txt" ;;

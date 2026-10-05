@@ -29,7 +29,9 @@ module px_core_b01 (
   input logic        data_gnt_i,
   input logic        data_rvalid_i,
   input logic [31:0] data_rdata_i,
-  input logic        data_err_i
+  input logic        data_err_i,
+  input logic        irq_req_i,
+  input logic [5:0]  irq_id_i
 );
 
   logic init = 1'b1;
@@ -44,10 +46,11 @@ module px_core_b01 (
     .instr_rvalid_i, .instr_rdata_i, .instr_err_i,
     .data_req_o(), .data_gnt_i, .data_addr_o(), .data_we_o(), .data_be_o(), .data_wdata_o(),
     .data_rvalid_i, .data_rdata_i, .data_err_i,
+    .irq_req_i, .irq_id_i, .irq_ack_o(), .irq_ack_id_o(),
     .rvfi_valid_o(), .rvfi_pc_o(), .rvfi_insn_o(), .rvfi_rd_addr_o(), .rvfi_rd_wdata_o(),
     .rvfi_mem_addr_o(), .rvfi_mem_rmask_o(), .rvfi_mem_wmask_o(), .rvfi_mem_rdata_o(),
     .rvfi_mem_wdata_o(), .rvfi_csr_we_o(), .rvfi_csr_addr_o(), .rvfi_csr_wdata_o(),
-    .trap_valid_o(), .trap_cause_o(), .trap_pc_o(), .trap_tval_o()
+    .trap_valid_o(), .trap_irq_o(), .trap_cause_o(), .trap_pc_o(), .trap_tval_o()
   );
   /* verilator lint_on PINCONNECTEMPTY */
 

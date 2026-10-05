@@ -11,10 +11,17 @@
  *   2. otherwise, for a synchronous exception whose instruction was fetched (every cause
  *      except an instruction access fault), the instruction after the trapping one:
  *      mepc + 2 or + 4, from the length bits of the instruction at mepc;
- *   3. an instruction access fault without a recovery address, or an interrupt (none
- *      exist before Phase 2), cannot be resumed: the test fails as test 2047.
+ *   3. an instruction access fault without a recovery address, or an interrupt in a
+ *      program that does not expect one, cannot be resumed: the test fails as test 2047.
  * It then restores the registers and returns with MRET. The testbench records and checks
- * every trap on the core's trap port as well. */
+ * every trap on the core's trap port as well.
+ *
+ * Programs built with PX_IRQ_RESUME (source line "px-build: irq", step 2.2b, D-033) expect
+ * interrupts: an interrupt (mcause bit 31) is counted in TF_IRQS, its mcause kept in
+ * TF_IRQ_ID, and the handler returns to mepc unchanged (the interrupted instruction runs
+ * again; nothing is skipped), or once to TF_IRQ_RESUME if a test armed it (code that sets
+ * mepc and executes MRET with MIE = 1 needs this: an interrupt in between overwrites
+ * mepc). The flag only adds code, so programs built without it do not change. */
 #include "px_test.h"
 
   .section .text.init, "ax"
@@ -27,6 +34,10 @@ _start:
   csrw mscratch, t0
   sw   zero, TF_COUNT(t0)
   sw   zero, TF_RESUME(t0)
+#ifdef PX_IRQ_RESUME
+  sw   zero, TF_IRQS(t0)
+  sw   zero, TF_IRQ_RESUME(t0)
+#endif
   li   gp, 0
   j    test_main
 
@@ -73,6 +84,19 @@ trap_return:
   mret
 
 trap_fatal:
+#ifdef PX_IRQ_RESUME
+  bgez t0, 1f                    /* t0 = mcause: interrupts have bit 31 set */
+  lw   t2, TF_IRQS(sp)
+  addi t2, t2, 1
+  sw   t2, TF_IRQS(sp)
+  sw   t0, TF_IRQ_ID(sp)
+  lw   t2, TF_IRQ_RESUME(sp)     /* armed interrupt resume address (one use) */
+  beqz t2, trap_return           /* mepc unchanged: resume the interrupted instruction */
+  sw   zero, TF_IRQ_RESUME(sp)
+  csrw mepc, t2
+  j    trap_return
+1:
+#endif
   li   gp, 0x7FF                 /* reported as test 2047: a trap nobody can resume */
   j    fail_handler
 

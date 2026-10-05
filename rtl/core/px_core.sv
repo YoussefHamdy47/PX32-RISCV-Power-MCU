@@ -47,8 +47,25 @@
 //     WB. A divide that is flushed from EX (older bus error; Phase 2 adds interrupt entry)
 //     is abandoned by px_div (kill) and restarts from its first cycle when fetched again.
 //
+// Interrupt take point (Phase 2 step 2.2b, DECISIONS.md D-033, PHASE2_ARCHITECTURE.md § 3)
+//   - irq_req_i/irq_id_i: the registered request of the interrupt controller (§ 4.3; until
+//     px_clic exists only testbenches drive it). It is eligible while mstatus.MIE is 1.
+//   - While an interrupt is eligible no new data request is raised (an ungranted request
+//     already raised stays until granted, OBI). The take (irq_take) happens when no older
+//     access is waiting in WB, no WB bus error, no ungranted request from the previous
+//     cycle (dreq_pend_q) and no synchronous exception in EX; it never depends on
+//     data_gnt_i or ex_to_wb. Priority: WB bus error, EX exception, take, EX redirect and
+//     CSR/MRET commit, ID JAL.
+//   - In the take cycle ID and EX are flushed, the divider is killed, nothing in EX
+//     commits (CSR write, MRET, multiplier stage 1, data request), the WB instruction
+//     retires, IF is redirected to mtvec BASE, and px_csr enters the trap with
+//     mepc = oldest unretired pc (EX, else ID, else the fetch pc), mcause = interrupt bit
+//     and irq_id_i[4:0], mtval = 0.
+//   - Latency with single-cycle memories: request registered at edge 1 (cycle 0 = the
+//     source's pending flop), take in cycle 1, first handler instruction in EX in cycle 4.
+//
 // Staged features (tracked in PROGRESS.md)
-//   - Interrupts: Phase 2 (CLIC).
+//   - CLIC mode, vectoring, levels and mnxti: Phase 2 step 2.2d.
 //   WFI executes as a NOP (allowed by the privileged spec); FENCE is a NOP (in-order
 //   core, no caches); FENCE.I refetches everything after it.
 
@@ -80,6 +97,15 @@ module px_core #(
   input  logic [31:0] data_rdata_i,
   input  logic        data_err_i,
 
+  // Interrupt request (PHASE2_ARCHITECTURE.md § 9.1; D-033): registered winner of the
+  // interrupt controller, and the take acknowledge for it
+  input  logic        irq_req_i,
+  /* verilator lint_off UNUSEDSIGNAL */
+  input  logic [5:0]  irq_id_i,       // bit 5 reaches mcause in step 2.2d (D-033 item 6)
+  /* verilator lint_on UNUSEDSIGNAL */
+  output logic        irq_ack_o,      // an interrupt is taken in this cycle
+  output logic [5:0]  irq_ack_id_o,   // ... with this id
+
   // Retirement trace (one entry per retired instruction, in program order)
   output logic        rvfi_valid_o,
   output logic [31:0] rvfi_pc_o,
@@ -95,8 +121,10 @@ module px_core #(
   output logic [11:0] rvfi_csr_addr_o,
   output logic [31:0] rvfi_csr_wdata_o,   // value of that CSR after the write
 
-  // Trap report (one pulse per trap; the trapping instruction does not retire)
+  // Trap report (one pulse per trap; the trapping instruction does not retire). For an
+  // interrupt (trap_irq_o) the cause is the id and the pc the interrupted instruction's.
   output logic        trap_valid_o,
+  output logic        trap_irq_o,
   output logic [4:0]  trap_cause_o,
   output logic [31:0] trap_pc_o,
   output logic [31:0] trap_tval_o
@@ -147,6 +175,7 @@ module px_core #(
   logic        wb_wait, wb_bus_err;
   logic        ex_hold, ex_redirect, ex_trap, ex_to_wb;
   logic        hold_older, hold_grant, hold_div;
+  logic        csr_mie, irq_elig, irq_take, dreq_gate, dreq_pend_q;
   logic        id_hold, id_redirect;
   logic        if_redirect;
   logic [31:0] if_redirect_pc;
@@ -382,8 +411,10 @@ module px_core #(
   logic ex_mem_go;          // EX holds a memory access that may be issued
   assign ex_mem_go = ex_valid_q && ex_is_mem && !ex_exc;
 
-  // The data request waits until the older access in WB has completed without error.
-  assign data_req_o   = ex_mem_go && !wb_wait && !wb_bus_err;
+  // The data request waits until the older access in WB has completed without error, and
+  // no new request is raised while an interrupt is eligible (D-033; one raised in the
+  // previous cycle and not yet granted stays raised, OBI).
+  assign data_req_o   = ex_mem_go && !wb_wait && !wb_bus_err && !dreq_gate;
   assign data_addr_o  = {alu_res[31:2], 2'b00};
   assign data_we_o    = ex_dec_q.is_store;
   assign data_be_o    = be;
@@ -405,7 +436,6 @@ module px_core #(
   assign csr_commit  = ex_to_wb && ex_dec_q.csr_en;
   assign mret_commit = ex_to_wb && ex_dec_q.is_mret;
 
-  /* verilator lint_off PINCONNECTEMPTY */
   px_csr #(.MTVEC_RESET(MTVEC_RESET)) u_csr (
     .clk_i, .rst_ni,
     .id_addr_i    (id_csr_addr),
@@ -421,16 +451,15 @@ module px_core #(
     .ex_noinc_o   (csr_noinc),
     .retire_i     (wb_count),
     .trap_i       (trap_valid_o),
-    .trap_irq_i   (1'b0),
+    .trap_irq_i   (trap_irq_o),
     .trap_cause_i (trap_cause_o),
     .trap_pc_i    (trap_pc_o),
     .trap_tval_i  (trap_tval_o),
     .mret_i       (mret_commit),
     .mtvec_o      (csr_mtvec),
     .mepc_o       (csr_mepc),
-    .mstatus_mie_o()
+    .mstatus_mie_o(csr_mie)
   );
-  /* verilator lint_on PINCONNECTEMPTY */
 
   // ===========================================================================
   // Multiplier and divider (D-023)
@@ -456,8 +485,8 @@ module px_core #(
   );
 
   // The divider runs while its instruction is valid in EX without an exception, and is
-  // killed by an EX flush (older WB bus error). Phase 2: interrupt entry is a second kill
-  // source. The instruction leaves EX (accept) in the cycle the result is done.
+  // killed by an EX flush: an older WB bus error or an interrupt take (D-023, D-033). The
+  // instruction leaves EX (accept) in the cycle the result is done.
   assign div_valid  = ex_valid_q && ex_is_div && !ex_exc;
   assign div_accept = ex_to_wb && ex_is_div;
   assign div_wait   = div_valid && !div_done;
@@ -465,7 +494,7 @@ module px_core #(
   px_div u_div (
     .clk_i, .rst_ni,
     .valid_i (div_valid),
-    .kill_i  (wb_bus_err),
+    .kill_i  (wb_bus_err || irq_take),
     .accept_i(div_accept),
     .op_i    (ex_md_op),
     .a_i     (fwd_a),
@@ -550,22 +579,38 @@ module px_core #(
   // EX trap and EX redirect ignore hold_grant (audit B-01): an instruction held only by
   // it is a memory access without exception, which neither traps in EX nor redirects, so
   // data_gnt_i does not reach the instruction port through them.
+  // Interrupt (D-033, § 3.2-3.3): eligible while MIE is set; while eligible no new data
+  // request is raised (dreq_gate), so the take never waits for a grant. dreq_pend_q: the
+  // request of the previous cycle was not granted and must stay raised (OBI).
+  assign irq_elig   = irq_req_i && csr_mie;
+  assign dreq_gate  = irq_elig && !dreq_pend_q;
+
   assign hold_older = wb_wait;
-  assign hold_grant = ex_mem_go && !data_gnt_i;
+  assign hold_grant = ex_mem_go && (dreq_gate || !data_gnt_i);
   assign hold_div   = div_wait;
   assign ex_hold    = hold_older || hold_grant || hold_div;
   assign id_hold    = ex_hold || load_use;
 
+  // Take: from flops and wb_wait/wb_bus_err only (no data_gnt_i, no ex_to_wb). A WB bus
+  // error and a synchronous exception in EX come first (contract § 2.3).
+  assign irq_take   = irq_elig && !wb_bus_err && !hold_older && !dreq_pend_q &&
+                      !(ex_valid_q && ex_exc);
+
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) dreq_pend_q <= 1'b0;
+    else         dreq_pend_q <= data_req_o && !data_gnt_i;
+  end
+
   assign ex_trap     = ex_valid_q && ex_exc && !(hold_older || hold_div) && !wb_bus_err;
-  assign ex_redirect = ex_valid_q && !(hold_older || hold_div) && !wb_bus_err &&
+  assign ex_redirect = ex_valid_q && !(hold_older || hold_div) && !wb_bus_err && !irq_take &&
                        (ex_exc || br_taken || ex_dec_q.is_jalr || ex_dec_q.is_fence_i ||
                         ex_dec_q.is_mret);
-  assign id_redirect = id_valid_q && !id_hold && !ex_redirect && !wb_bus_err &&
+  assign id_redirect = id_valid_q && !id_hold && !ex_redirect && !wb_bus_err && !irq_take &&
                        dec.is_jal && !id_ferr_q && !id_illegal;
 
-  assign if_redirect = wb_bus_err || ex_redirect || id_redirect;
+  assign if_redirect = wb_bus_err || ex_redirect || id_redirect || irq_take;
   always_comb begin
-    if (wb_bus_err || ex_trap)       if_redirect_pc = csr_mtvec;
+    if (wb_bus_err || ex_trap || irq_take) if_redirect_pc = csr_mtvec;
     else if (ex_redirect) begin
       if (br_taken)                  if_redirect_pc = br_target;
       else if (ex_is_jalr)           if_redirect_pc = jalr_target;
@@ -574,16 +619,25 @@ module px_core #(
     end else                         if_redirect_pc = jal_target;
   end
 
-  assign trap_valid_o = wb_bus_err || ex_trap;
-  assign trap_cause_o = wb_bus_err ? (wb_is_load_q ? EXC_LACCESS : EXC_SACCESS) : ex_cause;
-  assign trap_pc_o    = wb_bus_err ? wb_pc_q : ex_pc_q;
-  assign trap_tval_o  = wb_bus_err ? wb_addr_q : ex_tval;
+  // mepc of an interrupt: the oldest unretired instruction (§ 3.3)
+  logic [31:0] irq_epc;
+  assign irq_epc = ex_valid_q ? ex_pc_q : id_valid_q ? id_pc_q : if_pc;
+
+  // irq_take excludes wb_bus_err and ex_trap, so at most one of the three is set.
+  assign trap_valid_o = wb_bus_err || ex_trap || irq_take;
+  assign trap_irq_o   = irq_take;
+  assign trap_cause_o = wb_bus_err ? (wb_is_load_q ? EXC_LACCESS : EXC_SACCESS) :
+                        irq_take ? irq_id_i[4:0] : ex_cause;
+  assign trap_pc_o    = wb_bus_err ? wb_pc_q : irq_take ? irq_epc : ex_pc_q;
+  assign trap_tval_o  = wb_bus_err ? wb_addr_q : irq_take ? 32'd0 : ex_tval;
+  assign irq_ack_o    = irq_take;
+  assign irq_ack_id_o = irq_id_i;
 
   // ===========================================================================
   // Pipeline registers
   // ===========================================================================
 
-  assign ex_to_wb = ex_valid_q && !ex_hold && !ex_exc && !wb_bus_err;
+  assign ex_to_wb = ex_valid_q && !ex_hold && !ex_exc && !wb_bus_err && !irq_take;
   logic id_to_ex;
   assign id_to_ex = id_valid_q && !id_hold;
 
@@ -593,7 +647,7 @@ module px_core #(
       id_valid_q <= 1'b0;
       id_pc_q    <= 32'd0; id_instr_q <= 32'd0; id_raw_q <= 32'd0;
       id_is_c_q  <= 1'b0;  id_ill_c_q <= 1'b0;  id_ferr_q <= 1'b0;  id_ferr_hi_q <= 1'b0;
-    end else if (wb_bus_err || ex_redirect || id_redirect) begin
+    end else if (wb_bus_err || ex_redirect || id_redirect || irq_take) begin
       id_valid_q <= 1'b0;
     end else if (!id_hold) begin
       id_valid_q <= if_valid;
@@ -616,7 +670,7 @@ module px_core #(
       ex_dec_q   <= '0;
       ex_rs1_q   <= 32'd0; ex_rs2_q <= 32'd0;
       fwd_a_q    <= 1'b0;  fwd_b_q  <= 1'b0;
-    end else if (wb_bus_err || ex_redirect) begin
+    end else if (wb_bus_err || ex_redirect || irq_take) begin
       ex_valid_q <= 1'b0;
       fwd_a_q    <= 1'b0;  fwd_b_q  <= 1'b0;
     end else if (!ex_hold) begin
@@ -701,6 +755,10 @@ module px_core #(
   //   other; a trap raised in EX is reported one cycle later from the f_tr_* registers: the
   //   older instruction may retire in WB in the trap cycle, and the cycle after a trap has
   //   no WB instruction (ex_to_wb is 0 for a trapping instruction).
+  //   An interrupt take (D-033) reports nothing itself (the interrupted instruction does not
+  //   retire); the next entry, the handler's first instruction, has rvf_intr_o = 1. A take
+  //   never coincides with an EX trap, a WB bus error or a pending f_tr report (it needs
+  //   MIE = 1, which a trap clears).
   logic [4:0]  ex_f_rs1_addr, ex_f_rs2_addr;
   logic [31:0] ex_f_rs1_rdata, ex_f_rs2_rdata, ex_f_pc_wdata;
   assign ex_f_rs1_addr  = ex_dec_q.rs1_used ? ex_dec_q.rs1 : 5'd0;
@@ -766,7 +824,11 @@ module px_core #(
       f_intr_q  <= 1'b0;
     end else if (f_report) begin
       f_order_q <= f_order_q + 64'd1;
-      f_intr_q  <= f_trap;          // the next entry is the handler's first instruction
+      // the next entry is the handler's first instruction (trap, or an interrupt taken in
+      // this cycle after the WB retirement; D-033)
+      f_intr_q  <= f_trap || irq_take;
+    end else if (irq_take) begin
+      f_intr_q  <= 1'b1;
     end
   end
 

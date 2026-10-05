@@ -37,6 +37,10 @@
 #define TF_COUNT   24
 #define TF_RESUME  28
 #define TF_MSTATUS 32
+#define TF_IRQS    36             /* interrupts taken (PX_IRQ_RESUME programs) */
+#define TF_IRQ_ID  40             /* mcause of the last interrupt */
+#define TF_IRQ_RESUME 44          /* one-use interrupt return address (0: mepc) */
+#define IRQTRIG    0x2000FFD0     /* testbench interrupt trigger (tb_core, D-033) */
 
 #define CAUSE_IACCESS 1
 #define CAUSE_ILLEGAL 2

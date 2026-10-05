@@ -5,9 +5,10 @@
 # Usage: scripts/core_equiv.sh [reference-commit]     (default: main)
 #
 # Gold: the px_core source files of scripts/synth_targets.txt at the reference commit,
-# extracted with git show into sim/core_equiv/gold/. Gate: the working-tree files; when
-# px_core has the interrupt request port, the gate top is tb/formal/px_core_idle.sv, which
-# ties irq_req_i to 0 and exposes the reference port list. Both are read with the slang
+# extracted with git show into sim/core_equiv/gold/. Gate: the working-tree files; ports
+# the reference does not have (the interrupt request and acknowledge, trap_irq_o) are
+# removed from the flattened gate and its request inputs tied to 0, so every internal
+# signal keeps its name and can be paired with the reference. Both are read with the slang
 # front end (no RISCV_FORMAL defines: the product core), flattened, their asynchronous
 # resets turned into synchronous ones identically (async2sync), and compared by Yosys's
 # equivalence flow: equiv_make pairs equally named signals, equiv_simple proves each pair
@@ -41,10 +42,22 @@ for f in $(git show "$REF:scripts/synth_targets.txt" | sed -n 's/^px_core //p');
   gold_files="$gold_files $W/gold/$(basename "$f")"
 done
 gate_files="$(sed -n 's/^px_core //p' scripts/synth_targets.txt)"
-gate_top=px_core
+# CORE_EQUIV_GATE_DIR: take the gate's RTL files from that directory instead (by file
+# name; used to show that a planted difference is reported)
+if [ -n "${CORE_EQUIV_GATE_DIR:-}" ]; then
+  g=""
+  for f in $gate_files; do g="$g $CORE_EQUIV_GATE_DIR/$(basename "$f")"; done
+  gate_files="$g"
+fi
+# Interrupt ports (D-033): request inputs tied idle, acknowledge outputs not compared
+idle=""
 if grep -q "irq_req_i" rtl/core/px_core.sv; then
-  gate_files="$gate_files tb/formal/px_core_idle.sv"
-  gate_top=px_core_idle
+  idle="delete -port w:irq_req_i w:irq_id_i w:irq_ack_o w:irq_ack_id_o w:trap_irq_o
+cd px_core
+connect -set irq_req_i 1'b0
+connect -set irq_id_i 6'b000000
+cd ..
+opt_clean"
 fi
 
 cat > "$W/equiv.ys" <<EOF
@@ -55,12 +68,13 @@ flatten
 opt_clean
 rename px_core gold
 design -stash gold
-read_slang $gate_files --top $gate_top
-hierarchy -top $gate_top
+read_slang $gate_files --top px_core
+hierarchy -top px_core
 proc
 flatten
 opt_clean
-rename $gate_top gate
+$idle
+rename px_core gate
 design -stash gate
 design -copy-from gold -as gold gold
 design -copy-from gate -as gate gate
@@ -73,14 +87,14 @@ equiv_status
 EOF
 
 ALLOWED="ex_redirect"
-echo "reference $(git rev-parse --short "$REF"), gate top $gate_top"
+echo "reference $(git rev-parse --short "$REF")${idle:+, interrupt request tied idle}"
 yosys -m slang -l "$W/equiv.log" -s "$W/equiv.ys" > /dev/null 2>&1 || { echo "FAIL core equivalence: Yosys error (see $W/equiv.log)"; exit 1; }
 summary="$(grep -E "Of those cells [0-9]+ are proven and [0-9]+ are unproven" "$W/equiv.log" | tail -1)"
 [ -n "$summary" ] || { echo "FAIL core equivalence: no equiv_status summary (see $W/equiv.log)"; exit 1; }
 echo "$summary"
 n_unproven="$(echo "$summary" | awk '{print $(NF-2)}')"
-# "Unproven $equiv <cell>: <escape>name_gold <escape>name_gate": keep name
-unproven="$(grep -E '^ *Unproven ' "$W/equiv.log" | awk '{print $(NF-1)}' | sed -e 's/^.//' -e 's/_gold$//' | sort -u | xargs)"
+# "Unproven $equiv <cell>: <escape>name_gold [bit] <escape>name_gate [bit]": keep name
+unproven="$(grep -E '^ *Unproven ' "$W/equiv.log" | awk '{print $4}' | sed -e 's/^.//' -e 's/_gold$//' | sort -u | xargs)"
 n_listed="$(grep -cE '^ *Unproven ' "$W/equiv.log" || true)"
 if [ "$n_listed" != "$n_unproven" ]; then
   echo "FAIL core equivalence: $n_unproven unproven pairs reported, $n_listed parsed (see $W/equiv.log)"

@@ -14,6 +14,11 @@
 //     (any finite bound shows the absence of deadlock; this one keeps the BMC window short).
 //   - Reset: riscv-formal holds `reset` high for its reset cycles; px_core's reset is
 //     active low.
+//   - Interrupt request (step 2.2b, D-033, D-030 amendment): irq_req_i and irq_id_i are free
+//     in every cycle, so every check runs with interrupt takes possible (the handler's first
+//     instruction carries rvfi_intr). No assumption: a take clears MIE, so takes cannot
+//     follow each other without a retirement in between, and liveness needs no fairness
+//     assumption for them.
 
 module rvfi_wrapper (
   input  clock,
@@ -24,6 +29,8 @@ module rvfi_wrapper (
   (* keep *) `rvformal_rand_reg [31:0] i_rdata;
   (* keep *) `rvformal_rand_reg        d_gnt, d_rvalid;
   (* keep *) `rvformal_rand_reg [31:0] d_rdata;
+  (* keep *) `rvformal_rand_reg        irq;
+  (* keep *) `rvformal_rand_reg [5:0]  irq_id;
 
   (* keep *) wire        i_req;
   (* keep *) wire [31:0] i_addr;
@@ -37,7 +44,8 @@ module rvfi_wrapper (
   (* keep *) wire [31:0] c_rdata, c_wdata;
 
   // Product trace and trap ports are not used by riscv-formal.
-  wire        u_valid, u_csr_we, u_tvalid;
+  wire        u_valid, u_csr_we, u_tvalid, u_tirq, u_ack;
+  wire [5:0]  u_ack_id;
   wire [31:0] u_pc, u_insn, u_rd_wdata, u_mem_addr, u_mem_rdata, u_mem_wdata, u_csr_wdata;
   wire [31:0] u_tpc, u_ttval;
   wire [4:0]  u_rd, u_tcause;
@@ -53,12 +61,13 @@ module rvfi_wrapper (
     .data_req_o(d_req), .data_gnt_i(d_gnt), .data_addr_o(d_addr), .data_we_o(d_we),
     .data_be_o(d_be), .data_wdata_o(d_wdata), .data_rvalid_i(d_rvalid),
     .data_rdata_i(d_rdata), .data_err_i(1'b0),
+    .irq_req_i(irq), .irq_id_i(irq_id), .irq_ack_o(u_ack), .irq_ack_id_o(u_ack_id),
     .rvfi_valid_o(u_valid), .rvfi_pc_o(u_pc), .rvfi_insn_o(u_insn),
     .rvfi_rd_addr_o(u_rd), .rvfi_rd_wdata_o(u_rd_wdata), .rvfi_mem_addr_o(u_mem_addr),
     .rvfi_mem_rmask_o(u_rmask), .rvfi_mem_wmask_o(u_wmask),
     .rvfi_mem_rdata_o(u_mem_rdata), .rvfi_mem_wdata_o(u_mem_wdata),
     .rvfi_csr_we_o(u_csr_we), .rvfi_csr_addr_o(u_csr_addr), .rvfi_csr_wdata_o(u_csr_wdata),
-    .trap_valid_o(u_tvalid), .trap_cause_o(u_tcause), .trap_pc_o(u_tpc), .trap_tval_o(u_ttval),
+    .trap_valid_o(u_tvalid), .trap_irq_o(u_tirq), .trap_cause_o(u_tcause), .trap_pc_o(u_tpc), .trap_tval_o(u_ttval),
     .rvf_valid_o(rvfi_valid), .rvf_order_o(rvfi_order), .rvf_insn_o(rvfi_insn),
     .rvf_trap_o(rvfi_trap), .rvf_halt_o(rvfi_halt), .rvf_intr_o(rvfi_intr),
     .rvf_mode_o(rvfi_mode), .rvf_ixl_o(rvfi_ixl),
