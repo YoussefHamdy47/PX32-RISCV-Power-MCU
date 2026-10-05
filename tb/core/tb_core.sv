@@ -64,8 +64,11 @@
 //     value in ideal mode, at least 4 in every mode; every cycle in which the request is
 //     eligible but not taken has one of the excluded causes (WB bus error, older access in
 //     WB, ungranted request from the previous cycle, exception in EX)
-//   - coverage of the take point (EX contents and divider cycle at the take), reported;
-//     every bin must be hit when interrupt programs ran in ideal mode
+//   - no take over a synchronous exception in EX or a WB bus error (contract § 2.3:
+//     exceptions take precedence over maskable interrupts)
+//   - coverage of the take point (EX contents and divider cycle at the take) and of each
+//     deferral cause (WB bus error, EX exception, older access, ungranted request),
+//     reported; every bin must be hit once an interrupt was taken in ideal mode
 //   Programs with <name>.replay (built with "px-build: irq") have no static reference:
 //   the bench writes every retirement, exception and interrupt of each run in program order
 //   to sim/logs/replay_<NAME>_<run>.ev and lists the runs in sim/logs/replay_<NAME>.manifest;
@@ -223,6 +226,7 @@ module tb_core #(
   localparam int COV_EX = 13;
   int          cov_ex [COV_EX];
   int          cov_div [1:17];
+  int          cov_defer [4];   // eligible but deferred: WB bus error, EX exception, older access, ungranted request
   bit          irq_ideal_seen;
 
   // OBI stability tracking
@@ -531,6 +535,9 @@ module tb_core #(
         if (dut.csr_commit || dut.mret_commit || d_req || dut.u_mul.en_i ||
             dut.div_accept)
           run_error("CSR commit, MRET, data request, multiply or divide completion in a take cycle");
+        // contract § 2.3: synchronous exceptions (and an older access fault) take precedence
+        if ((dut.ex_valid_q && dut.ex_exc) || dut.wb_bus_err)
+          run_error("interrupt taken over a synchronous exception or a WB bus error");
         // coverage
         if (dut.ex_valid_q) begin
           if (dut.ex_is_div) begin
@@ -556,10 +563,15 @@ module tb_core #(
         end
         irq_wait_ex = 1'b1;
         irq_target  = dut.csr_mtvec;
-      end else if (irq_req && dut.csr_mie &&
-                   !(dut.wb_bus_err || dut.hold_older || dut.dreq_pend_q ||
-                     (dut.ex_valid_q && dut.ex_exc)))
-        run_error("eligible interrupt not taken, and no excluded condition holds");
+      end else if (irq_req && dut.csr_mie) begin
+        // eligible but deferred: count each cause (coverage), any other reason is an error
+        if (dut.wb_bus_err)                    cov_defer[0]++;
+        if (dut.ex_valid_q && dut.ex_exc)      cov_defer[1]++;
+        if (dut.hold_older)                    cov_defer[2]++;
+        if (dut.dreq_pend_q)                   cov_defer[3]++;
+        if (!(dut.wb_bus_err || dut.hold_older || dut.dreq_pend_q || (dut.ex_valid_q && dut.ex_exc)))
+          run_error("eligible interrupt not taken, and no excluded condition holds");
+      end
       if (irq_wait_ex && !irq_ack && dut.ex_valid_q) begin
         int lat;
         irq_wait_ex = 1'b0;
@@ -842,6 +854,7 @@ module tb_core #(
     irq_ideal_seen = 1'b0;
     for (int k = 0; k < COV_EX; k++) cov_ex[k] = 0;
     for (int k = 1; k <= 17; k++) cov_div[k] = 0;
+    for (int k = 0; k < 4; k++) cov_defer[k] = 0;
     man_fd = $fopen($sformatf("sim/logs/replay_%s.manifest", NAME), "w");
     if (man_fd == 0) begin
       $display("FAIL %s (cannot write the replay manifest)", NAME);
@@ -880,6 +893,8 @@ module tb_core #(
         if (cov_ex[k] == 0) begin holes++; $display("hole: take with EX/ID kind %0d", k); end
       for (int k = 1; k <= 17; k++)
         if (cov_div[k] == 0) begin holes++; $display("hole: take at divider cycle %0d", k); end
+      for (int k = 0; k < 4; k++)
+        if (cov_defer[k] == 0) begin holes++; $display("hole: take deferred by cause %0d", k); end
       if (holes != 0) begin
         $display("ERROR %0d interrupt coverage holes", holes);
         total_errors += holes;
@@ -893,7 +908,7 @@ module tb_core #(
       if (total_irqs == 0)
         $display("PASS %s (%0d program runs, %0d retirements matched the reference model, %0d data accesses checked exactly once)", NAME, runs, total_ref, xo_checked);
       else
-        $display("PASS %s (%0d program runs, %0d retirements matched the reference model, %0d data accesses checked exactly once; %0d interrupts taken, %0d latencies %0d-%0d cycles, take coverage %0d+17 bins; %0d runs for replay)",
+        $display("PASS %s (%0d program runs, %0d retirements matched the reference model, %0d data accesses checked exactly once; %0d interrupts taken, %0d latencies %0d-%0d cycles, take coverage %0d+17+4 bins; %0d runs for replay)",
                  NAME, runs, total_ref, xo_checked, total_irqs, lat_checked, lat_min, lat_max,
                  COV_EX, replay_runs);
     end else begin

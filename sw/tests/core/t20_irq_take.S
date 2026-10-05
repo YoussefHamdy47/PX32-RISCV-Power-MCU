@@ -1,5 +1,5 @@
 /* t20_irq_take: interrupt take point (Phase 2 step 2.2b, DECISIONS.md D-033;
- * PHASE2_VERIFICATION.md § 3.2). px-build: irq
+ * PHASE2_VERIFICATION.md Ã‚Â§ 3.2). px-build: irq
  *
  * Built with PX_IRQ_RESUME: crt0 resumes after an interrupt at mepc (or at an armed
  * TF_IRQ_RESUME). Every run is checked afterwards by scripts/px_iss.py --replay (the
@@ -10,7 +10,7 @@
  * state of the block in turn; the block's results are checked after the interrupt (the
  * interrupted instruction runs again after the handler). Trigger word: [15:0] delay,
  * [21:16] id (also the mcause code), [27:24] expected latency in ideal mode (4, the
- * non-vectored budget of PHASE2_ARCHITECTURE.md § 4.9; 0 = not checked, used where MIE is
+ * non-vectored budget of PHASE2_ARCHITECTURE.md Ã‚Â§ 4.9; 0 = not checked, used where MIE is
  * 0 when the request arrives or an exception comes first), bit 31 random extra delay.
  *   S1 control flow: ALU, JAL in ID, taken branch, JALR, FENCE.I, JAL with link
  *   S2 loads and stores (the request of a memory instruction in EX is withheld)
@@ -22,7 +22,12 @@
  *   S8 request arriving around an ECALL: the exception first, the interrupt after its
  *      handler (MIE = 0 inside the handler)
  *   S9 S1 again with a random extra delay (stall modes: random take points)
+ *   S10 request around a load access fault: the older access's bus error first
+ * The bench also requires every deferral cause to occur (WB bus error: S10; exception in
+ * EX: S8; older access and ungranted request: the stall modes) and checks that no take
+ * wins over an exception (contract Ã‚Â§ 2.3).
  */
+#define FAULT_ADDR 0x30000000             /* unmapped in tb_core: access fault */
 #include "px_test.h"
 
 #define TRIG(id, lat)   (((lat) << 24) | ((id) << 16))
@@ -191,15 +196,21 @@ s6_loop:
   lw   t4, TF_IRQ_ID(t4)
   CHECK(18, t4, 0x8000000F)       /* mcause: interrupt bit, code = id 15 */
 
-  /* ---- S8: request around an ECALL, d = 0..3 ---- */
+  /* ---- S8: request around an ECALL, d = 0..11 ---- */
   li   s0, 0
 s8_loop:
   ARM_D(17, 0, s0)
+  nop                             /* the request becomes visible 2 + d cycles after
+  nop                                the trigger store retires: the delays cross the
+  nop                                cycle in which the ECALL is in EX */
+  nop
+  nop
+  nop
 s8_ecall:
   ecall                           /* crt0 skips it; the interrupt waits for its MRET */
   WAIT_IRQS(19)
   addi s0, s0, 1
-  li   t0, 4
+  li   t0, 12
   blt  s0, t0, s8_loop
 
   /* ---- S9: S1 with a random extra delay (bit 31), 20 times ---- */
@@ -232,16 +243,46 @@ s9_loop:
   li   t0, 20
   blt  s0, t0, s9_loop
 
+  /* ---- S10: request around a load access fault, d = 0..5 (the older bus error first) ---- */
+  li   s0, 0
+s10_loop:
+  ARM_D(21, 0, s0)
+  li   a0, FAULT_ADDR
+  addi a1, a1, 1
+  addi a1, a1, 1
+s10_load:
+  lw   a2, 0(a0)                  /* bus error in WB; crt0 skips the load */
+  addi a1, a1, 1
+  addi a1, a1, 1
+  WAIT_IRQS(22)
+  addi s0, s0, 1
+  li   t0, 6
+  blt  s0, t0, s10_loop
+
   /* every armed request was taken exactly once */
   li   t4, TRAP_FRAME
   lw   t4, TF_IRQS(t4)
-  CHECK_REG(22, t4, s1)
-  li   t0, 160                    /* 24 + 16 + 11 + 57 + 11 + 16 + 1 + 4 + 20 */
-  CHECK_REG(23, s1, t0)
+  CHECK_REG(23, t4, s1)
+  li   t0, 174                    /* 24 + 16 + 11 + 57 + 11 + 16 + 1 + 12 + 20 + 6 */
+  CHECK_REG(24, s1, t0)
   PASS
 
-  TRAPS(4)
+  TRAPS(18)
   TRAP(CAUSE_ECALL_M, s8_ecall, 0)
   TRAP(CAUSE_ECALL_M, s8_ecall, 0)
   TRAP(CAUSE_ECALL_M, s8_ecall, 0)
   TRAP(CAUSE_ECALL_M, s8_ecall, 0)
+  TRAP(CAUSE_ECALL_M, s8_ecall, 0)
+  TRAP(CAUSE_ECALL_M, s8_ecall, 0)
+  TRAP(CAUSE_ECALL_M, s8_ecall, 0)
+  TRAP(CAUSE_ECALL_M, s8_ecall, 0)
+  TRAP(CAUSE_ECALL_M, s8_ecall, 0)
+  TRAP(CAUSE_ECALL_M, s8_ecall, 0)
+  TRAP(CAUSE_ECALL_M, s8_ecall, 0)
+  TRAP(CAUSE_ECALL_M, s8_ecall, 0)
+  TRAP(CAUSE_LACCESS, s10_load, FAULT_ADDR)
+  TRAP(CAUSE_LACCESS, s10_load, FAULT_ADDR)
+  TRAP(CAUSE_LACCESS, s10_load, FAULT_ADDR)
+  TRAP(CAUSE_LACCESS, s10_load, FAULT_ADDR)
+  TRAP(CAUSE_LACCESS, s10_load, FAULT_ADDR)
+  TRAP(CAUSE_LACCESS, s10_load, FAULT_ADDR)
