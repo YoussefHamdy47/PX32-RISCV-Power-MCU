@@ -339,76 +339,106 @@
 + id_instr_q[31], id_instr_q[19:12], id_instr_q[21],
 # JAL target adder takes the wrong immediate bit 11
 
-# ------------------------------------------------------------------ px_csr (step 1.6)
-[S01] rtl/core/px_csr.sv tb_px_csr
+# ------------------------------------------------------------------ px_csr (step 1.6; moved to px_csr_m and the px_csr top in step 2.2a, D-032: same bugs)
+[S01] rtl/core/px_csr_m.sv tb_px_csr
 - assign instret_lo = retire_i ? minstret_lo_inc : minstret_lo_q;
 + assign instret_lo = minstret_lo_q;
 # a minstret read misses an older instruction retiring in the same cycle
 
-[S02] rtl/core/px_csr.sv tb_px_csr
+[S02] rtl/core/px_csr_m.sv tb_px_csr
 - mpie_q        <= mie_q;\n      mie_q         <= 1'b0;
 + mpie_q        <= 1'b1;\n      mie_q         <= 1'b0;
 # trap entry does not save MIE in MPIE
 
-[S03] rtl/core/px_csr.sv tb_px_csr
+[S03] rtl/core/px_csr_m.sv tb_px_csr
 - mie_q         <= mpie_q;\n      mpie_q        <= 1'b1;
 + mie_q         <= mpie_q;\n      mpie_q        <= 1'b0;
 # MRET clears MPIE instead of setting it
 
-[S04] rtl/core/px_csr.sv tb_px_csr
+[S04] rtl/core/px_csr_m.sv tb_px_csr
 - CSR_MISA:      ex_rdata_o = MISA_VALUE;
 + CSR_MISA:      ex_rdata_o = MISA_VALUE & ~32'h0000_1000;
 # misa does not advertise M although MUL/DIV are implemented
 
-[S05] rtl/core/px_csr.sv tb_px_csr
+[S05] rtl/core/px_csr_m.sv tb_px_csr
 - (id_write_i && id_addr_i[11:10] == 2'b11);
 + (id_write_i && id_addr_i[11:10] == 2'b10);
 # read-only address space decoded wrongly: writes to mhartid accepted
 
-[S06] rtl/core/px_csr.sv tb_px_csr
+[S06] rtl/core/px_csr_m.sv tb_px_csr
 - if (w_mcycle)       mcycle_lo_q <= wval;
 + if (w_mcycle)       mcycle_lo_q <= wval + 32'd1;
 # an mcycle write also counts the write cycle
 
 [S07] rtl/core/px_csr.sv tb_px_csr
-- assign we = ex_commit_i && ex_write_i && !trap_i && !mret_i;
-+ assign we = ex_write_i && !trap_i && !mret_i;
-# CSR write without commit (stalled or cancelled accesses write)
+- assign commit_u = ex_commit_i && !trap_i && !mret_i;
++ assign commit_u = !trap_i && !mret_i;
+# CSR write without commit (stalled or cancelled accesses write); since step 2.2a the
+# commit qualification is in the px_csr top
 
-[S08] rtl/core/px_csr.sv tb_px_csr
+
+[S08] rtl/core/px_csr_m.sv tb_px_csr
 - assign w_base = wval[31:2];
 + assign w_base = wval[29:0];
 # mtvec BASE taken from the wrong bits
 
-[S09] rtl/core/px_csr.sv tb_px_csr
+[S09] rtl/core/px_csr_m.sv tb_px_csr
 - assign minstret_hi_inc = minstret_hi_q + {31'd0, &minstret_lo_q};
 + assign minstret_hi_inc = minstret_hi_q;
 # no carry from minstret into minstreth
 
-[S10] rtl/core/px_csr.sv tb_px_csr
+[S10] rtl/core/px_csr_m.sv tb_px_csr
 - minstret_hi_q <= w_minstreth ? wval : instret_hi;
 + minstret_hi_q <= w_minstreth ? wval : (w_minstret ? minstret_hi_q : instret_hi);
 # a minstret write drops the carry of an older instruction retiring in the same cycle
 
-[S11] rtl/core/px_csr.sv tb_px_csr
+[S11] rtl/core/px_csr_m.sv tb_px_csr
 - assign w_irq  = wval[31];
 + assign w_irq  = wval[30];
 # mcause interrupt bit written from the wrong bit
 
-[S12] rtl/core/px_csr.sv tb_px_csr
+[S12] rtl/core/px_csr_m.sv tb_px_csr
 - if (a >= CSR_MHPMCOUNTER3  && a <= CSR_MHPMCOUNTER31)  e = 1'b1;
 + if (a >= CSR_MHPMCOUNTER3  && a <= 12'hB20)            e = 1'b1;
 # a nonexistent CSR (0xB20) accepted
 
-[S13] rtl/core/px_csr.sv tb_px_csr
+[S13] rtl/core/px_csr_m.sv tb_px_csr
 - assign w_mpie = wval[MSTATUS_MPIE];
 + assign w_mpie = wval[MSTATUS_MIE];
 # mstatus.MPIE written from the MIE bit
 
-[S14] rtl/core/px_csr.sv tb_px_csr
+[S14] rtl/core/px_csr_m.sv tb_px_csr
 - mcycle_hi_q <= mcycle_hi_inc;
 + mcycle_hi_q <= mcycle_hi_q;
 # no carry from mcycle into mcycleh
+
+# ------------------------------------------------------------------ CSR sub-units (step 2.2a, D-032)
+[U01] rtl/core/px_csr.sv tb_px_csr
+- assign id_illegal_o = !(|id_hit_u) || |(id_hit_u & id_ill_u);
++ assign id_illegal_o = !(|id_hit_u);
+# the top ignores the owning unit's verdict: writes to read-only CSRs (mhartid) accepted
+
+[U02] rtl/core/px_csr.sv tb_px_csr
+- assign id_illegal_o = !(|id_hit_u) || |(id_hit_u & id_ill_u);
++ assign id_illegal_o = |(id_hit_u & id_ill_u);
+# an address that no unit owns is accepted
+
+[U03] rtl/core/px_csr.sv tb_px_csr
+-       if (ex_hit_u[k]) begin
++       if (id_hit_u[k]) begin
+# read and write-back data selected by the ID hit instead of the EX hit
+
+[U04] rtl/core/px_csr_m.sv tb_px_csr
+- assign id_hit_o = csr_exists(id_addr_i);
++ assign id_hit_o = csr_exists(id_addr_i) || id_addr_i == 12'h7C0;
+# px_csr_m also claims 0x7C0 (pxbank, reserved for px_csr_px): with that unit present two
+# units would hit; today the address is wrongly legal
+
+[U05] rtl/core/px_csr_m.sv tb_px_csr
+- assign ex_hit_o = csr_exists(ex_addr_i);
++ assign ex_hit_o = 1'b1;
+# px_csr_m claims every EX address: no read value changes (its data is 0 outside its
+# addresses), only the ownership check sees it
 
 # ------------------------------------------------------------------ CSR integration (step 1.6)
 [K01] rtl/core/px_core.sv tb_core
@@ -602,7 +632,7 @@
 # load/store access-fault mtval loses the byte offset (the bus request is word aligned);
 # survived every bench until t06 cases 14-15 (pre-Phase 2 audit)
 
-[P22] rtl/core/px_csr.sv tb_core
+[P22] rtl/core/px_csr_m.sv tb_core
 -       CSR_MTVEC:     ex_wdata_o = {w_base, 2'b00};
 +       CSR_MTVEC:     ex_wdata_o = wval;
 # retirement trace reports the unlegalized mtval write (MODE bits); only the CSR-write
