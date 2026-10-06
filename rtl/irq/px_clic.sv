@@ -57,12 +57,20 @@
 //
 //   cycle        T-1       T              T+1                         T+2
 //   pend[C]      1         1              0 (vectored ack / claim)    0
-//   irq_id_o     ..        C              B (next maximum) or invalid  fresh
+//   irq_id_o     ..        C              invalid, or B (see below)   maximum of pend(T+1)
 //   irq_req_o    ..        1 (C)          never for C                 fresh
 //   ack_i        0         1, ack_id = C  0                           0
 //
+// The winner registered at T+1 is the maximum computed in cycle T: invalid if that is C
+// itself, otherwise that other id B (for example a higher interrupt whose pending flop was
+// set at edge T, presented without delay). An invalid winner reads id 0, level 0x0F, shv 0.
 // A new edge of C in cycle T keeps pend[C] at 1 (the second event is not lost); C is still
 // not presented at T+1, and is presented again from T+2.
+//
+// Interface rules for the core (step 2.2d, D-034 item 13 obligations): mil_i,
+// mintthresh_i and clic_mode_i come from flops (irq_req_o depends on them combinationally);
+// ack_i only with irq_req_o = 1 and ack_id_i = irq_id_o; claim_i only for a valid winner,
+// claim_id_i = irq_id_o. The unit defines its behaviour for every other input combination.
 
 `timescale 1ns/1ps
 

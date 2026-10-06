@@ -883,3 +883,124 @@
 - assign trap_pc_o    = wb_bus_err ? wb_pc_q : irq_take ? irq_epc : ex_pc_q;
 + assign trap_pc_o    = wb_bus_err ? wb_pc_q : ex_pc_q;
 # mepc of an interrupt is always the EX pc, even when EX is empty
+
+# ------------------------------------------------------------------ px_clic (step 2.2c, D-034)
+[L01] rtl/irq/px_clic.sv tb_px_clic
+- assign r       = {t_v[2*n+1], t_l[2*n+1]} >= {t_v[2*n], t_l[2*n]};
++ assign r       = {t_v[2*n+1], t_l[2*n+1]} > {t_v[2*n], t_l[2*n]};
+# tie-break direction: equal levels go to the lower id (K-50)
+
+[L02] rtl/irq/px_clic.sv tb_px_clic
+- (win_level > mintthresh_i)
++ (win_level >= mintthresh_i)
+# threshold compare not strict: a level equal to mintthresh requests (K-51)
+
+[L03] rtl/irq/px_clic.sv tb_px_clic
+- (win_level > mil_i)
++ (win_level >= mil_i)
+# mil compare not strict: a level equal to mil requests (K-52)
+
+[L04] rtl/irq/px_clic.sv tb_px_clic
+- (~edge_q & (irq_i ^ neg_q));
++ (~edge_q & (irq_i ^ ~neg_q));
+# level-mode polarity inverted (K-22 trig[1])
+
+[L05] rtl/irq/px_clic.sv tb_px_clic
+- prev_q      <= irq_i;
++ prev_q      <= irq_i ^ neg_q;
+# edge detection on the wrong sample: the stored sample is taken after polarity (D-034 item 7)
+
+[L06] rtl/irq/px_clic.sv tb_px_clic
+- assign edge_ev = (neg_q & ~irq_i & prev_q) | (~neg_q & irq_i & ~prev_q);
++ assign edge_ev = (neg_q & irq_i & ~prev_q) | (~neg_q & irq_i & ~prev_q);
+# negative edge mode detects rising edges
+
+[L07] rtl/irq/px_clic.sv tb_px_clic
+- (ack_v & {NUM_IRQ{ack_i && win_shv_q}})
++ (ack_v & {NUM_IRQ{ack_i}})
+# ack clears a non-vectored edge pending bit (K-71, D-034 item 9)
+
+[L08] rtl/irq/px_clic.sv tb_px_clic
+- (claim_v & {NUM_IRQ{claim_i}})
++ (claim_v & {NUM_IRQ{1'b0}})
+# claim does not clear the edge pending bit (K-35)
+
+[L09] rtl/irq/px_clic.sv tb_px_clic
+- assign win_valid_d = root_v && !(ack_i && root_ka) && !(claim_i && root_kc);
++ assign win_valid_d = root_v && !(claim_i && root_kc);
+# no invalidation after ack: the acknowledged id is presented again from a stale register
+
+[L10] rtl/irq/px_clic.sv tb_px_clic
+- assign win_valid_d = root_v && !(ack_i && root_ka) && !(claim_i && root_kc);
++ assign win_valid_d = root_v && !(ack_i && root_ka);
+# no invalidation after claim: the claimed id can be claimed twice
+
+[L11] rtl/irq/px_clic.sv tb_px_clic
+- assign win_valid_d = root_v && !(ack_i && root_ka) && !(claim_i && root_kc);
++ assign win_valid_d = root_v && !ack_i && !claim_i;
+# full invalidation (PHASE2_ARCHITECTURE.md § 4.3 as written): a higher interrupt arriving at a claim is delayed by one cycle (D-034 item 14)
+
+[L12] rtl/irq/px_clic.sv tb_px_clic
+- (~edge_q & (irq_i ^ neg_q));
++ (~edge_q & ((irq_i ^ neg_q) | (w_ip & {NUM_IRQ{wdata_i[0]}})));
+# level mode accepts software writes of the pending bit (K-20)
+
+[L13] rtl/irq/px_clic.sv tb_px_clic
+- assign w_ie    = sel_v & {NUM_IRQ{be_i[1]}};
++ assign w_ie    = sel_v & {NUM_IRQ{be_i[2]}};
+# byte-lane swap: clicintie written by the clicintattr lane (K-26)
+
+[L14] rtl/irq/px_clic.sv tb_px_clic
+- localparam logic [7:0]  ONES = 8'hFF >> LB;
++ localparam logic [7:0]  ONES = 8'h00 >> LB;
+# clicintctl low bits not forced to 1 (K-23)
+
+[L15] rtl/irq/px_clic.sv tb_px_clic
+- {rd_ctl, 2'b11, 3'b000,
++ {rd_ctl, 2'b11, 3'b010,
+# a reserved clicintattr bit reads 1 (K-22)
+
+[L16] rtl/irq/px_clic.sv tb_px_clic
+- assign hit = req_i && (addr_i[15:12] == 4'h1) && idx_ok;
++ assign hit = req_i && (addr_i[14:12] == 3'h1) && idx_ok;
+# offset bit 15 ignored: 0x9000 + 4i (Phase 4 mtime space) aliases entry i (D-034 item 1)
+
+[L17] rtl/irq/px_clic.sv tb_px_clic
+- assign pend_edge = edge_ev | (w_ip & {NUM_IRQ{wdata_i[0]}}) | (~w_ip & ~clr & pend_q);
++ assign pend_edge = ((edge_ev | pend_q) & ~clr & ~w_ip) | (w_ip & {NUM_IRQ{wdata_i[0]}});
+# a same-cycle ack/claim or write wins over a new edge: the edge is lost (D-034 item 8)
+
+[L18] rtl/irq/px_clic.sv tb_px_clic
+- (ack_v & {NUM_IRQ{ack_i && win_shv_q}})
++ (ack_v & {NUM_IRQ{ack_i}} & shv_q)
+# ack clear decided by the current clicintattr.shv instead of the presented winner's (D-034 item 9)
+
+[L19] rtl/irq/px_clic.sv tb_px_clic
+- rdata_q     <= (hit && !we_i) ? rd_word : 32'd0;
++ rdata_q     <= hit ? rd_word : 32'd0;
+# a write response carries read data
+
+[L20] rtl/irq/px_clic.sv tb_px_clic
+- rvalid_q    <= req_i;
++ rvalid_q    <= req_i && !we_i;
+# no response for writes (contract § 3.2)
+
+[L21] rtl/irq/px_clic.sv tb_px_clic
+- win_valid_q && clic_mode_i &&
++ win_valid_q &&
+# a request in CLINT mode (D-034 item 13)
+
+[L22] rtl/irq/px_clic.sv tb_px_clic
+- assign win_id_d    = win_valid_d ? root_id : '0;
++ assign win_id_d    = root_id;
+# an invalid winner shows a stale id (D-034 item 12)
+
+[L23] rtl/irq/px_clic.sv tb_px_clic
+- assign t_v[NUM_IRQ + i]  = pend_q[i] && ie_q[i];
++ assign t_v[NUM_IRQ + i]  = pend_q[i];
+# a disabled interrupt competes (K-21, K-50)
+
+[L24] rtl/irq/px_clic.sv tb_px_clic
+- assign t_sh[n] = r ? t_sh[2*n+1] : t_sh[2*n];
++ assign t_sh[n] = r ? t_sh[2*n] : t_sh[2*n+1];
+# the winner's shv is taken from the losing child
