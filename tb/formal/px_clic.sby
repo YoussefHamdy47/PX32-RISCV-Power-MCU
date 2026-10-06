@@ -1,0 +1,35 @@
+# Formal check of px_clic (step 2.2c, DECISIONS.md D-034; properties and environment in
+# tb/formal/px_clic_fv.sv).
+# Run: scripts/formal.sh   (SymbiYosys from OSS CAD Suite; results in sim/formal/)
+# formal-default-tasks: bmc prove cover
+# bmc_short (depth 5) is the task scripts/formal_mutants.py runs on each px_clic mutant.
+[tasks]
+bmc
+bmc_short
+prove
+cover
+
+[options]
+bmc: mode bmc
+bmc: depth 10
+bmc_short: mode bmc
+bmc_short: depth 5
+prove: mode prove
+prove: depth 3
+cover: mode cover
+cover: depth 10
+
+[engines]
+smtbmc bitwuzla
+
+[script]
+plugin -i slang
+bmc: read_slang px_clic.sv px_clic_fv.sv --top px_clic_fv
+bmc_short: read_slang px_clic.sv px_clic_fv.sv --top px_clic_fv
+prove: read_slang -DINDUCTION px_clic.sv px_clic_fv.sv --top px_clic_fv
+cover: read_slang px_clic.sv px_clic_fv.sv --top px_clic_fv
+prep -top px_clic_fv
+
+[files]
+rtl/irq/px_clic.sv
+tb/formal/px_clic_fv.sv
