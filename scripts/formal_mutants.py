@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Formal mutation check: does each formal harness fail on every planted bug in its RTL?
 
-Harnesses (HARNESSES below): px_csr (tb/formal/px_csr.sby; rtl/core/px_csr.sv and
-rtl/core/px_csr_m.sv, task bmc) and px_clic (tb/formal/px_clic.sby; rtl/irq/px_clic.sv,
+Harnesses (HARNESSES below): px_csr (tb/formal/px_csr.sby; rtl/core/px_csr.sv,
+rtl/core/px_csr_m.sv and, since step 2.2d, rtl/core/px_csr_clic.sv, task bmc) and px_clic (tb/formal/px_clic.sby; rtl/irq/px_clic.sv,
 task bmc_short, step 2.2c, D-034). For every mutant of scripts/mutants.txt whose file is one
 of a harness's RTL files, the script copies that file into sim/fv_mut/<harness>/<id>/,
 applies the edit there, writes a copy of the harness's .sby whose [files] section points at
@@ -40,7 +40,8 @@ import mutate  # noqa: E402  (shares the mutant file parser)
 OSS = Path(os.environ.get("OSS_CAD_SUITE", "C:/oss-cad-suite"))
 # name: (job file, RTL files the mutants may target, default task)
 HARNESSES = {
-    "px_csr": (ROOT / "tb" / "formal" / "px_csr.sby", ["rtl/core/px_csr.sv", "rtl/core/px_csr_m.sv"], "bmc"),
+    "px_csr": (ROOT / "tb" / "formal" / "px_csr.sby",
+               ["rtl/core/px_csr.sv", "rtl/core/px_csr_m.sv", "rtl/core/px_csr_clic.sv"], "bmc"),
     "px_clic": (ROOT / "tb" / "formal" / "px_clic.sby", ["rtl/irq/px_clic.sv"], "bmc_short"),
 }
 RESULT = re.compile(r"DONE \((PASS|FAIL|ERROR|UNKNOWN)")

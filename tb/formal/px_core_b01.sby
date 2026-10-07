@@ -17,7 +17,7 @@ smtbmc bitwuzla
 
 [script]
 plugin -i slang
-read_slang px_pkg.sv px_alu.sv px_regfile.sv px_decoder.sv px_decompressor.sv px_if_stage.sv px_csr_m.sv px_csr.sv px_mul.sv px_div.sv px_core.sv px_core_b01.sv --top px_core_b01
+read_slang px_pkg.sv px_alu.sv px_regfile.sv px_decoder.sv px_decompressor.sv px_if_stage.sv px_csr_m.sv px_csr_clic.sv px_csr.sv px_mul.sv px_div.sv px_core.sv px_core_b01.sv --top px_core_b01
 prep -top px_core_b01
 
 [files]
@@ -28,6 +28,7 @@ rtl/core/px_decoder.sv
 rtl/core/px_decompressor.sv
 rtl/core/px_if_stage.sv
 rtl/core/px_csr_m.sv
+rtl/core/px_csr_clic.sv
 rtl/core/px_csr.sv
 rtl/core/px_mul.sv
 rtl/core/px_div.sv

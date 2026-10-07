@@ -436,10 +436,17 @@ module px_core #(
   assign csr_commit  = ex_to_wb && ex_dec_q.csr_en;
   assign mret_commit = ex_to_wb && ex_dec_q.is_mret;
 
+  // Step 2.2d part B (D-035): px_csr has the CLIC unit; the CLIC winner inputs are idle
+  // until px_clic is connected (part C), so the core stays in CLINT behaviour except for
+  // the CSR accesses themselves.
+  /* verilator lint_off PINCONNECTEMPTY */
   px_csr #(.MTVEC_RESET(MTVEC_RESET)) u_csr (
     .clk_i, .rst_ni,
     .id_addr_i    (id_csr_addr),
     .id_write_i   (dec.csr_write),
+    .id_op_i      ({dec.csr_use_imm, dec.csr_op}),
+    .id_rd_zero_i (dec.rd == 5'd0),
+    .id_imm_i     (dec.rs1),
     .id_illegal_o (id_csr_illegal),
     .ex_addr_i    (ex_csr_addr),
     .ex_op_i      (ex_csr_op),
@@ -449,17 +456,32 @@ module px_core #(
     .ex_rdata_o   (csr_rdata),
     .ex_wdata_o   (csr_wdata),
     .ex_noinc_o   (csr_noinc),
+    .side_we_o    (),
+    .side_wdata_o (),
     .retire_i     (wb_count),
     .trap_i       (trap_valid_o),
     .trap_irq_i   (trap_irq_o),
-    .trap_cause_i (trap_cause_o),
+    .trap_cause_i ({1'b0, trap_cause_o}),
+    .trap_minhv_i (1'b0),
     .trap_pc_i    (trap_pc_o),
     .trap_tval_i  (trap_tval_o),
     .mret_i       (mret_commit),
+    .irq_valid_i  (1'b0),
+    .irq_id_i     (6'd0),
+    .irq_level_i  (8'd0),
+    .irq_shv_i    (1'b0),
     .mtvec_o      (csr_mtvec),
     .mepc_o       (csr_mepc),
-    .mstatus_mie_o(csr_mie)
+    .mstatus_mie_o(csr_mie),
+    .clic_mode_o  (),
+    .mil_o        (),
+    .mintthresh_o (),
+    .minhv_o      (),
+    .tbl_addr_o   (),
+    .claim_o      (),
+    .claim_id_o   ()
   );
+  /* verilator lint_on PINCONNECTEMPTY */
 
   // ===========================================================================
   // Multiplier and divider (D-023)

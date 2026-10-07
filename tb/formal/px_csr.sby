@@ -1,4 +1,4 @@
-# Formal check of px_csr against a model of DECISIONS.md D-022 (audit D-10; properties and
+# Formal check of px_csr against a model of DECISIONS.md D-022 and the CLIC CSRs of D-035 (audit D-10; properties and
 # environment in tb/formal/px_csr_fv.sv).
 # Run: scripts/formal.sh   (SymbiYosys from OSS CAD Suite; results in sim/formal/)
 # formal-default-tasks: bmc prove cover
@@ -20,13 +20,14 @@ smtbmc bitwuzla
 
 [script]
 plugin -i slang
-bmc: read_slang px_pkg.sv px_csr_m.sv px_csr.sv px_csr_fv.sv --top px_csr_fv
-prove: read_slang -DINDUCTION px_pkg.sv px_csr_m.sv px_csr.sv px_csr_fv.sv --top px_csr_fv
-cover: read_slang px_pkg.sv px_csr_m.sv px_csr.sv px_csr_fv.sv --top px_csr_fv
+bmc: read_slang px_pkg.sv px_csr_m.sv px_csr_clic.sv px_csr.sv px_csr_fv.sv --top px_csr_fv
+prove: read_slang -DINDUCTION px_pkg.sv px_csr_m.sv px_csr_clic.sv px_csr.sv px_csr_fv.sv --top px_csr_fv
+cover: read_slang px_pkg.sv px_csr_m.sv px_csr_clic.sv px_csr.sv px_csr_fv.sv --top px_csr_fv
 prep -top px_csr_fv
 
 [files]
 rtl/pkg/px_pkg.sv
 rtl/core/px_csr_m.sv
+rtl/core/px_csr_clic.sv
 rtl/core/px_csr.sv
 tb/formal/px_csr_fv.sv

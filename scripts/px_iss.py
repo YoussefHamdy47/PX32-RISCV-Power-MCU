@@ -43,11 +43,12 @@ It runs the same ITCM/DTCM images that tb_core loads and writes the reference fi
 tb_core compares every run against:
   <prefix>.trace.ref   one line per retired instruction, up to and including the
                        store to tohost: pc insn rd rd_wdata mem_addr rmask wmask mem_data
-                       care csr_we csr_addr csr_wdata csr_care (hex; mem_data is the
-                       loaded word for loads, the store data aligned to its byte lanes for
-                       stores; only masked lanes count; care has a 1 for every bit of
-                       rd_wdata/mem_data the model knows; csr_wdata is the value of the
-                       written CSR after the write, csr_care its known bits)
+                       care csr_we csr_addr csr_wdata csr_care side_we side0..side3 (hex;
+                       mem_data is the loaded word for loads, the store data aligned to its
+                       byte lanes for stores; only masked lanes count; care has a 1 for
+                       every bit of rd_wdata/mem_data the model knows; csr_wdata is the
+                       value of the written CSR after the write, csr_care its known bits;
+                       side_we/side0-3 the writes of other CSRs, step 2.2d)
   <prefix>.traps.ref   first line: trap count; then cause pc tval per trap
 
 Platform model (must match tb/core/tb_core.sv)
@@ -76,6 +77,41 @@ D-022 mcause keeps code bits [4:0]), mtval = 0, MPIE = MIE, MIE = 0, pc = mtvec 
 retirement and exception before and after is compared with the model as for a static
 reference (same fields, same care masks), and the log must end with the tohost store.
 
+CLIC (Phase 2 step 2.2d, DECISIONS.md D-035; written from the pinned CLIC draft 0.9, the
+"CLIC CSRs", "CLIC Interrupt Operation" and "smclicshv" chapters, PHASE2_CLIC_MATRIX.md and the
+platform choices of D-034/D-035, not from px_clic or the bench models):
+  CSRs: mtvec mode WARL {00, 11} (CLIC mode = 11, base [31:6]); mtvt [31:6]; mcause in CLIC
+  format {interrupt, minhv, mpp = 11, mpie = mstatus.MPIE, mpil, exccode[5:0]} or the D-022
+  CLINT format; leaving CLIC mode zeroes mpil and minhv; mnxti (only csrr, csrrsi, csrrci,
+  uimm bits 0, 2, 4 clear); mintthresh (reads 0 in CLINT mode); mscratchcswl (csrrw with rd
+  and rs1 not x0; swaps when (mpil == 0) != (mil == 0) in CLIC mode); mintstatus (mil,
+  read-only). Other forms of mnxti/mscratchcswl and mscratchcsw (0x348) are illegal.
+  Entry in CLIC mode: mcause = {interrupt, minhv, mpil = mil, code}, an interrupt sets
+  mil = its level, an exception keeps it; target NBASE, or for a vectored interrupt the
+  table word M[TBASE + 4 * id] & ~1 (a table fetch outside ITCM is an instruction access
+  fault with minhv = 1, mepc = mtval = the table address); MRET sets mil = mpil and with
+  minhv = 1 refetches the table word at mepc & ~3. The trace reports side writes of other
+  CSRs in four slots (mstatus, mscratch, mcause, mintstatus).
+  Memory-mapped CLIC at 0xE000_0000 (64 KiB): entry i at 0x1000 + 4i (i < 64): byte 0
+  clicintip (bit 0), 1 clicintie (bit 0), 2 clicintattr (mode reads 11, bit 2 negative
+  polarity, bit 1 edge, bit 0 shv), 3 clicintctl (bits 7:4 the level, 3:0 read 1111); all
+  else reads 0, writes ignored. Pending: level mode = input ^ polarity; edge mode set by an
+  edge of the input (raw sample against the previous cycle's), else written by software,
+  else cleared by a vectored take of the id or an mnxti claim. Selection: the maximum
+  {level, id} of the pending-and-enabled inputs (ties to the higher id), registered: the
+  winner presented in cycle c is the maximum of cycle c-1's state, invalid if that id was
+  acknowledged or claimed in cycle c-1; a store, claim or take acts at the end of its cycle.
+  A request is presented while the winner is valid, the mode is CLIC and its level is above
+  mil and mintthresh.
+  The CLIC depends on time, so CLIC programs are interrupt programs checked by replay: the
+  event log carries the cycle of every input change (X lines), the cycle in which each
+  retired instruction left EX (its data grant or CSR commit) and retired, and the cycle of
+  every take. px_iss models the CLIC cycle by cycle from those stamps and checks: every
+  interrupt was eligible (pending, enabled, the maximum, above max(mil, mintthresh), MIE = 1,
+  CLIC mode) when taken, its target, every CLIC register read, every mnxti value and claim,
+  every CSR side write; and that no interrupt stays eligible for four retirement boundaries
+  without being taken (a missing take).
+
 Usage: python scripts/px_iss.py <prefix> [max_steps]
        reads <prefix>.itcm.hex and <prefix>.dtcm.hex
        python scripts/px_iss.py --replay <manifest>    (tb_core interrupt runs)
@@ -88,6 +124,9 @@ ITCM, DTCM, DEV = 0x10000000, 0x20000000, 0x20010000
 SIZE, DEV_SIZE = 0x10000, 0x1000
 TOHOST, TRAPVEC, BOOT = 0x2000FFF0, 0x10000040, 0x10000000
 M32 = 0xFFFFFFFF
+CLIC_BASE, CLIC_SIZE, NIRQ = 0xE0000000, 0x10000, 64
+M64 = (1 << 64) - 1
+MISSING_TAKE_BOUNDARIES = 4
 
 
 class Nondeterministic(Exception):
@@ -99,7 +138,8 @@ CSR_RW_ADDRS = {0x300, 0x301, 0x304, 0x305, 0x310, 0x340, 0x341, 0x342, 0x343, 0
                 0xB00, 0xB02, 0xB80, 0xB82}
 CSR_RW_ADDRS |= set(range(0xB03, 0xB20)) | set(range(0xB83, 0xBA0)) | set(range(0x323, 0x340))
 CSR_RW_ADDRS |= set(range(0x3A0, 0x3F0))         # pmpcfg0-15, pmpaddr0-63: zero PMP entries
-CSR_RO_ADDRS = {0xF11, 0xF12, 0xF13, 0xF14, 0xF15}
+CSR_RW_ADDRS |= {0x307, 0x345, 0x347, 0x349}      # CLIC: mtvt, mnxti, mintthresh, mscratchcswl
+CSR_RO_ADDRS = {0xF11, 0xF12, 0xF13, 0xF14, 0xF15, 0xFB1}   # IDs; mintstatus
 # MXL = 32, I, M, C and B (privileged manual: B = Zba, Zbb and Zbs all implemented)
 MISA = (1 << 30) | (1 << 12) | (1 << 8) | (1 << 2) | (1 << 1)
 
@@ -162,10 +202,139 @@ def bitmanip(op, a, b):
     raise AssertionError(op)
 
 
+class Clic:
+    """The memory-mapped CLIC and its registered winner, cycle by cycle (see the docstring).
+
+    State "during cycle c" is the state after the edge that ends cycle c-1. Events stamped c
+    (stores, claims, takes) act at the edge that ends cycle c. inputs(c) is the input vector
+    during cycle c, from the X lines of the event log.
+    """
+
+    def __init__(self, xlines):
+        self.xs = sorted(xlines)          # (cycle, vector)
+        self.xi = 0
+        self.cyc = 0                      # current state = state during cycle self.cyc
+        self.pend = self.ie = self.edge = self.neg = self.shv = 0
+        self.lvl = [0] * NIRQ             # PX32 level bits (clicintctl[7:4])
+        self.w = None                     # winner presented in cycle self.cyc: (id, level, shv)
+        self.events = {}                  # cycle -> list of ("st", off, be, data) / ("ack", id) / ("claim", id)
+        self.inp_last = 0
+        self.inp = self.input_at(0)       # inputs during self.cyc
+        self.prev = 0                     # inputs during self.cyc - 1
+
+    def input_at(self, c):
+        while self.xi < len(self.xs) and self.xs[self.xi][0] <= c:
+            self.inp_last = self.xs[self.xi][1]
+            self.xi += 1
+        return self.inp_last
+
+    def add_event(self, c, ev):
+        if c < self.cyc:
+            raise Nondeterministic(f"CLIC event at cycle {c} after the model reached cycle {self.cyc}")
+        self.events.setdefault(c, []).append(ev)
+
+    @staticmethod
+    def level8(l4):
+        return (l4 << 4) | 0xF
+
+    def max_of(self, cand):
+        best = None
+        while cand:
+            i = cand.bit_length() - 1
+            cand &= ~(1 << i)
+            k = (self.lvl[i], i)
+            if best is None or k > best:
+                best = k
+        return best
+
+    def step(self):
+        """State during self.cyc -> state during self.cyc + 1."""
+        c = self.cyc
+        evs = self.events.pop(c, [])
+        inp = self.inp
+        w_ip = w_ie = w_attr = w_ctl = 0          # masks of entries written this cycle (per field)
+        d_ip = d_ie = 0
+        attr_new, ctl_new = {}, {}
+        clr = 0
+        inval = set()
+        for ev in evs:
+            if ev[0] == "st":
+                _, off, be, data = ev
+                i = self.entry(off)
+                if i is None:
+                    continue
+                b = 1 << i
+                if be & 1:
+                    w_ip |= b
+                    if data & 1:
+                        d_ip |= b
+                if be & 2:
+                    w_ie |= b
+                    if (data >> 8) & 1:
+                        d_ie |= b
+                if be & 4:
+                    w_attr |= b
+                    attr_new[i] = (data >> 16) & 7
+                if be & 8:
+                    w_ctl |= b
+                    ctl_new[i] = (data >> 28) & 0xF
+            elif ev[0] == "ack":
+                inval.add(ev[1])
+                if self.w is not None and self.w[2]:      # cleared only after a vectored entry
+                    clr |= 1 << ev[1]
+            elif ev[0] == "claim":
+                inval.add(ev[1])
+                clr |= 1 << ev[1]
+        # winner presented in the next cycle: the maximum of this cycle's state
+        cand = self.pend & self.ie
+        m = self.max_of(cand)
+        if m is None or m[1] in inval:
+            nw = None
+        else:
+            nw = (m[1], self.level8(m[0]), bool((self.shv >> m[1]) & 1))
+        # pending flops (edge > software write > clear > hold; level mode follows the input)
+        ev_edge = ((~self.neg & inp & ~self.prev) | (self.neg & ~inp & self.prev)) & M64
+        pe = ev_edge | (w_ip & d_ip) | (~w_ip & ~clr & self.pend & M64)
+        self.pend = ((self.edge & pe) | (~self.edge & (inp ^ self.neg))) & M64
+        self.ie = (w_ie & d_ie) | (~w_ie & self.ie & M64)
+        for i, a in attr_new.items():
+            b = 1 << i
+            self.shv = (self.shv & ~b) | ((a & 1) << i)
+            self.edge = (self.edge & ~b) | (((a >> 1) & 1) << i)
+            self.neg = (self.neg & ~b) | (((a >> 2) & 1) << i)
+        for i, l4 in ctl_new.items():
+            self.lvl[i] = l4
+        self.w = nw
+        self.cyc = c + 1
+        self.prev = inp
+        self.inp = self.input_at(self.cyc)
+
+    def advance_to(self, c):
+        if c < self.cyc:
+            raise Nondeterministic(f"CLIC model asked for cycle {c} after reaching cycle {self.cyc}")
+        while self.cyc < c:
+            self.step()
+
+    @staticmethod
+    def entry(off):
+        if (off >> 12) == 1 and ((off >> 2) & 0x3FF) < NIRQ:
+            return (off >> 2) & 0x3FF
+        return None
+
+    def read(self, off):
+        """Word at offset off (state during the current cycle)."""
+        i = self.entry(off)
+        if i is None:
+            return 0
+        attr = 0xC0 | (((self.neg >> i) & 1) << 2) | (((self.edge >> i) & 1) << 1) | ((self.shv >> i) & 1)
+        ctl = (self.lvl[i] << 4) | 0xF
+        return (ctl << 24) | (attr << 16) | (((self.ie >> i) & 1) << 8) | ((self.pend >> i) & 1)
+
+
 class Trap(Exception):
-    def __init__(self, cause, tval):
+    def __init__(self, cause, tval, inhv=0, pc=None):
         super().__init__(cause, tval)
-        self.cause, self.tval = cause, tval & M32
+        self.cause, self.tval, self.inhv, self.pc = cause, tval & M32, inhv, pc
 
 
 def sext(v, bits):
@@ -188,11 +357,45 @@ class Machine:
         self.unknown = set()            # byte addresses holding unknown data
         # CSR state
         self.mie = self.mpie = 0
-        self.mtvec = TRAPVEC
-        self.mscratch = self.mepc = self.mcause = self.mtval = 0
+        self.mtvec = TRAPVEC            # read value: base and mode bits (11 = CLIC mode)
+        self.mscratch = self.mepc = self.mtval = 0
+        self.mc_irq = self.mc_inhv = self.mc_pil = self.mc_code = 0   # mcause fields
+        self.mtvt = self.mil = self.mth = 0
         self.instret = 0                # 64-bit minstret
+        self.clic = None                # Clic model (replay runs only)
+        self.stamp_ex = self.stamp_ret = None
+        self.csr_side = {}              # slot -> value written to another CSR
+        self.vec_fault = None           # table address of a vector fetch that faults next
 
     # ------------------------------------------------------------------ CSRs
+    def clic_mode(self):
+        return (self.mtvec & 3) == 3
+
+    def mcause_val(self):
+        if self.clic_mode():
+            return ((self.mc_irq << 31) | (self.mc_inhv << 30) | (3 << 28) | (self.mpie << 27) |
+                    (self.mc_pil << 16) | self.mc_code)
+        return (self.mc_irq << 31) | (self.mc_code & 0x1F)
+
+    def winner(self):
+        """CLIC winner presented in the cycle of the current instruction's EX commit."""
+        if self.clic is None:
+            raise Nondeterministic("CLIC winner needed outside a replay run")
+        self.clic.advance_to(self.stamp_ex)
+        return self.clic.w
+
+    def nxti(self):
+        """(mnxti read value, winner it names or None)."""
+        if not self.clic_mode():
+            return 0, None
+        w = self.winner()
+        if w is None or w[2] or w[1] <= self.mc_pil or w[1] <= self.mth:
+            return 0, None
+        return (self.mtvt + 4 * w[0]) & M32, w
+
+    def cswl_swap(self):
+        return self.clic_mode() and ((self.mc_pil == 0) != (self.mil == 0))
+
     def csr_read(self, a):
         if a == 0x300:
             return (3 << 11) | (self.mpie << 7) | (self.mie << 3)
@@ -200,14 +403,22 @@ class Machine:
             return MISA
         if a == 0x305:
             return self.mtvec
+        if a == 0x307:
+            return self.mtvt
         if a == 0x340:
             return self.mscratch
         if a == 0x341:
             return self.mepc
         if a == 0x342:
-            return self.mcause
+            return self.mcause_val()
         if a == 0x343:
             return self.mtval
+        if a == 0x345:
+            return self.nxti()[0]
+        if a == 0x347:
+            return self.mth if self.clic_mode() else 0
+        if a == 0xFB1:
+            return self.mil << 24
         if a in (0xB00, 0xB80):
             return None                 # mcycle: timing dependent
         if a == 0xB02:
@@ -224,13 +435,27 @@ class Machine:
         if a == 0x300:
             self.mie, self.mpie = (v >> 3) & 1, (v >> 7) & 1
         elif a == 0x305:
-            self.mtvec = v & ~3 & M32   # Direct mode only
+            was = self.clic_mode()
+            self.mtvec = ((v & 0xFFFFFFC0) | 3) if (v & 3) == 3 else (v & ~3 & M32)
+            if was and not self.clic_mode():       # leaving CLIC mode zeroes pil and inhv
+                self.mc_pil = self.mc_inhv = 0
+                self.csr_side[2] = self.mcause_val()
+        elif a == 0x307:
+            self.mtvt = v & 0xFFFFFFC0
         elif a == 0x340:
             self.mscratch = v
         elif a == 0x341:
             self.mepc = v & ~1 & M32
         elif a == 0x342:
-            self.mcause = v & 0x8000001F
+            self.mc_irq = v >> 31
+            if self.clic_mode():
+                self.mc_inhv, self.mc_pil, self.mc_code = (v >> 30) & 1, (v >> 16) & 0xFF, v & 0x3F
+                self.mpie = (v >> 27) & 1             # the mpie alias writes mstatus.MPIE
+                self.csr_side[0] = self.csr_read(0x300)
+            else:
+                self.mc_code = v & 0x1F
+        elif a == 0x347:
+            self.mth = v & 0xFF
         elif a == 0x343:
             self.mtval = v
         elif a == 0xB02:
@@ -239,16 +464,34 @@ class Machine:
             self.instret = (self.instret & M32) | (v << 32)
         # misa, mie, mip, mstatush, hpm counters and events: writes ignored
 
-    def take_trap(self, pc, cause, tval):
+    def take_trap(self, pc, cause, tval, irq=0, inhv=0, level=0):
         self.mepc = pc & ~1
-        self.mcause = cause
+        self.mc_irq, self.mc_code = irq, cause
+        if self.clic_mode():
+            self.mc_inhv, self.mc_pil = inhv, self.mil
+            if irq:
+                self.mil = level
         self.mtval = tval & M32
         self.mpie, self.mie = self.mie, 0
-        self.pc = self.mtvec & ~3
+        self.pc = self.mtvec & ~3 & M32           # OBASE, or NBASE (bits 5:2 are 0 in CLIC mode)
 
-    def take_interrupt(self, code):
+    def table_fetch(self, addr):
+        """Handler address from the vector table entry at addr, or None (fetch fault)."""
+        if not (ITCM <= addr < ITCM + SIZE - 3):
+            return None
+        o = addr - ITCM
+        return int.from_bytes(self.itcm[o:o + 4], "little") & ~1
+
+    def take_interrupt(self, code, level=0, shv=False):
         """Interrupt entry before the instruction at self.pc (it does not execute)."""
-        self.take_trap(self.pc, (1 << 31) | (code & 0x1F), 0)
+        self.take_trap(self.pc, code, 0, irq=1, level=level)
+        if shv:
+            tbl = (self.mtvt + 4 * code) & M32
+            h = self.table_fetch(tbl)
+            if h is None:
+                self.vec_fault = tbl
+            else:
+                self.pc = h
 
     # ------------------------------------------------------------------ memory
     def region(self, addr):
@@ -268,6 +511,11 @@ class Machine:
         mem, o = self.region(addr)
         if mem is not None:
             return int.from_bytes(mem[o:o + 4], "little"), False
+        if CLIC_BASE <= addr < CLIC_BASE + CLIC_SIZE:
+            if self.clic is None:
+                raise Nondeterministic("CLIC access outside a replay run")
+            self.clic.advance_to(self.stamp_ex)
+            return self.clic.read(addr - CLIC_BASE), False
         if addr == DEV:
             v = self.dev_reads
             self.dev_reads += 1
@@ -291,6 +539,14 @@ class Machine:
             return False                  # accepted, no state
         if addr == DEV + 4:
             self.dev_writes += 1
+            return False
+        if CLIC_BASE <= addr < CLIC_BASE + CLIC_SIZE:
+            if self.clic is None:
+                raise Nondeterministic("CLIC access outside a replay run")
+            if not known:
+                raise Nondeterministic(f"unknown value stored to the CLIC at {addr:08x}")
+            self.clic.advance_to(self.stamp_ex)
+            self.clic.add_event(self.stamp_ex, ("st", addr - CLIC_BASE, mask, data))
             return False
         return True
 
@@ -453,6 +709,10 @@ class Machine:
     def step(self):
         """Execute one instruction. Returns ('retire', record) or ('trap', (cause, pc, tval))."""
         pc = self.pc
+        if self.vec_fault is not None:            # the table fetch faults (smclicshv, K-73)
+            tbl, self.vec_fault = self.vec_fault, None
+            self.take_trap(tbl, 1, tbl, inhv=1)
+            return "trap", (1, tbl, tbl)
         try:
             insn, length = self.fetch()
             d = self.decode32(insn) if length == 4 else self.decode16(insn)
@@ -461,8 +721,9 @@ class Machine:
             rec = self.execute(pc, insn, length, d)
             return "retire", rec
         except Trap as t:
-            self.take_trap(pc, t.cause, t.tval)
-            return "trap", (t.cause, pc, t.tval)
+            tpc = pc if t.pc is None else t.pc
+            self.take_trap(tpc, t.cause, t.tval, inhv=t.inhv)
+            return "trap", (t.cause, tpc, t.tval)
 
     def need(self, v, what):
         if v is None:
@@ -482,6 +743,7 @@ class Machine:
         maddr, rmask, wmask, mdata, mcare = 0, 0, 0, 0, M32
         count = True
         self.csr_written = None
+        self.csr_side = {}
         if op == "lui":
             wval, writes = imm, True
         elif op == "auipc":
@@ -536,6 +798,16 @@ class Machine:
         elif op == "mret":
             nxt = self.mepc
             self.mie, self.mpie = self.mpie, 1
+            if self.clic_mode():
+                self.mil = self.mc_pil                # mpil unchanged
+                if self.mc_inhv:                      # refetch the table entry (K-74)
+                    tbl = self.mepc & ~3 & M32
+                    h = self.table_fetch(tbl)
+                    if h is None:                     # MRET retires; the fetch fault follows
+                        self.vec_fault = tbl
+                        nxt = tbl
+                    else:
+                        nxt = h
         elif op == "ecall":
             raise Trap(11, 0)
         elif op == "ebreak":
@@ -562,7 +834,10 @@ class Machine:
             cw, caddr, cval = 1, self.csr_written[0], self.csr_written[1]
             if cval is None:
                 cval, ccare = 0, 0
-        return (pc, insn, rd_out, rd_val, maddr, rmask, wmask, mdata, care, cw, caddr, cval, ccare)
+        sx = sum(1 << k for k in self.csr_side)
+        sv = [self.csr_side.get(k, 0) & M32 for k in range(4)]
+        return (pc, insn, rd_out, rd_val, maddr, rmask, wmask, mdata, care, cw, caddr, cval, ccare,
+                sx, sv[0], sv[1], sv[2], sv[3])
 
     @staticmethod
     def alu(op, a, b, rs1, rs2):
@@ -607,7 +882,35 @@ class Machine:
             raise Trap(2, insn)
         if write and (addr >> 10) == 3:
             raise Trap(2, insn)
+        # reserved forms (draft: mnxti only csrr, csrrsi, csrrci with uimm bits 0, 2, 4 clear;
+        # mscratchcswl only csrrw with rd and rs1 not x0)
+        if addr == 0x345 and not ((f3 == 2 and rs1 == 0) or (f3 in (6, 7) and rs1 & 0b10101 == 0)):
+            raise Trap(2, insn)
+        if addr == 0x349 and not (f3 == 1 and rd != 0 and rs1 != 0):
+            raise Trap(2, insn)
         src = rs1 if f3 >= 5 else self.x[rs1]       # zimm or rs1 value
+        if addr == 0x345:                           # mnxti: read pointer, read-modify-write mstatus
+            val, w = self.nxti()
+            if write:
+                self.mie = (self.mie | (src >> 3) & 1) if f3 == 6 else (self.mie & ~(src >> 3) & 1)
+                self.csr_side[0] = self.csr_read(0x300)
+                if w is not None:
+                    self.mil, self.mc_code, self.mc_irq = w[1], w[0], 1
+                    self.csr_side[2] = self.mcause_val()
+                    self.csr_side[3] = self.mil << 24
+                    self.clic.add_event(self.stamp_ex, ("claim", w[0]))
+                self.csr_written = (addr, 0)
+            return val, True
+        if addr == 0x349:                           # mscratchcswl
+            if src is None:
+                raise Nondeterministic(f"unknown value written to CSR {addr:03x}")
+            if self.cswl_swap():
+                val, self.mscratch = self.mscratch, src
+                self.csr_side[1] = src
+            else:
+                val = src
+            self.csr_written = (addr, 0)
+            return val, True
         old = self.csr_read(addr)                   # read before any write
         if write:
             kind = f3 & 3
@@ -685,7 +988,7 @@ def replay_run(ev_path, prefix):
                 errs.append(f"{where}: retirement pc {pc:08x}; model trap {r}")
             else:
                 (e_pc, e_insn, e_rd, e_wd, e_ma, e_rm, e_wm, e_md, e_care, e_cw, e_ca, e_cd,
-                 e_ccare) = r
+                 e_ccare) = r[:13]
                 lm = sum(0xFF << (8 * b) for b in range(4) if (rm | wm) >> b & 1)
                 bad = (pc != e_pc or insn != e_insn or rd != e_rd or (wd & e_care) != (e_wd & e_care)
                        or rm != e_rm or wm != e_wm
@@ -755,7 +1058,7 @@ def main():
             break
     else:
         sys.exit(f"{prefix}: no tohost store within {max_steps} instructions")
-    lines = ["%08x %08x %02d %08x %08x %x %x %08x %08x %d %03x %08x %08x" % t for t in trace]
+    lines = ["%08x %08x %02d %08x %08x %x %x %08x %08x %d %03x %08x %08x" % t[:13] for t in trace]
     Path(prefix + ".trace.ref").write_bytes(("\n".join(lines) + "\n").encode())
     tl = [str(len(traps))] + ["%d %08x %08x" % t for t in traps]
     Path(prefix + ".traps.ref").write_bytes(("\n".join(tl) + "\n").encode())

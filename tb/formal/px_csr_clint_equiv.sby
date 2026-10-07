@@ -1,0 +1,58 @@
+# CLINT-mode equivalence of the step 2.2d CSR file with the step 2.2c one (DECISIONS.md
+# D-035 item 8; miter, assumption A and properties in tb/formal/px_csr_clint_equiv.sv).
+# Replaces the step 2.2a miter px_csr_equiv (Phase 1 px_csr against the 2.2a split, D-032):
+# px_csr.sv and px_csr_m.sv did not change between that proof (c2f7ce5) and 1c3a17f, so the
+# Phase 1 unit, the 2.2a-2.2c units and, under assumption A, the 2.2d units are equivalent.
+# Run: scripts/formal.sh   (it first writes the references named below to sim/formal/ref/;
+#      results in sim/formal/px_csr_clint_equiv_<task>/). Default tasks: the unbounded proofs
+#      for both parameter sets, the two necessity tasks (each drops one part of assumption A
+#      and must find a counterexample: expect fail) and cover. The output-only BMC task (depth
+#      12) runs on request: sby -f --prefix sim/formal/px_csr_clint_equiv tb/formal/px_csr_clint_equiv.sby bmc
+# formal-ref: 1c3a17f2d441d2b46e9493d51bd47b4ff7f84e8f rtl/core/px_csr.sv px_csr px_csr_ref px_csr_m=px_csr_m_ref
+# formal-ref: 1c3a17f2d441d2b46e9493d51bd47b4ff7f84e8f rtl/core/px_csr_m.sv px_csr_m px_csr_m_ref
+# formal-default-tasks: prove prove_alt nec_mode11 nec_addr cover
+[tasks]
+prove
+prove_alt
+bmc
+nec_mode11
+nec_addr
+cover
+
+[options]
+prove: mode prove
+prove: depth 2
+prove_alt: mode prove
+prove_alt: depth 2
+bmc: mode bmc
+bmc: depth 12
+nec_mode11: mode bmc
+nec_mode11: depth 6
+nec_mode11: expect fail
+nec_addr: mode bmc
+nec_addr: depth 6
+nec_addr: expect fail
+cover: mode cover
+cover: depth 8
+
+[engines]
+smtbmc bitwuzla
+
+[script]
+plugin -i slang
+prove: read_slang -DINDUCTION px_pkg.sv px_csr_m.sv px_csr_clic.sv px_csr.sv px_csr_m_ref.sv px_csr_ref.sv px_csr_clint_equiv.sv --top px_csr_clint_equiv
+prove_alt: read_slang -DINDUCTION -DALT px_pkg.sv px_csr_m.sv px_csr_clic.sv px_csr.sv px_csr_m_ref.sv px_csr_ref.sv px_csr_clint_equiv.sv --top px_csr_clint_equiv
+bmc: read_slang px_pkg.sv px_csr_m.sv px_csr_clic.sv px_csr.sv px_csr_m_ref.sv px_csr_ref.sv px_csr_clint_equiv.sv --top px_csr_clint_equiv
+nec_mode11: read_slang -DNO_A2 px_pkg.sv px_csr_m.sv px_csr_clic.sv px_csr.sv px_csr_m_ref.sv px_csr_ref.sv px_csr_clint_equiv.sv --top px_csr_clint_equiv
+nec_addr: read_slang -DNO_A1 px_pkg.sv px_csr_m.sv px_csr_clic.sv px_csr.sv px_csr_m_ref.sv px_csr_ref.sv px_csr_clint_equiv.sv --top px_csr_clint_equiv
+cover: read_slang px_pkg.sv px_csr_m.sv px_csr_clic.sv px_csr.sv px_csr_m_ref.sv px_csr_ref.sv px_csr_clint_equiv.sv --top px_csr_clint_equiv
+prep -top px_csr_clint_equiv
+
+[files]
+rtl/pkg/px_pkg.sv
+rtl/core/px_csr_m.sv
+rtl/core/px_csr_clic.sv
+rtl/core/px_csr.sv
+sim/formal/ref/px_csr_m_ref.sv
+sim/formal/ref/px_csr_ref.sv
+tb/formal/px_csr_clint_equiv.sv

@@ -185,15 +185,16 @@ t_mtinst:
   csrr s1, mtvec                       /* no trap may occur while mtvec is changed */
   csrw mtvec, a1
   csrr a0, mtvec
-  CHECK(67, a0, 0xFFFFFFFC)            /* BASE only: MODE reads Direct */
-  addi a2, s1, 1                       /* MODE = vectored: not implemented */
+  CHECK(67, a0, 0xFFFFFFC3)            /* MODE 11: CLIC mode, BASE [31:6] (D-035; was Direct) */
+  addi a2, s1, 1                       /* MODE = vectored: not implemented, back to Direct */
   csrw mtvec, a2
   csrr a0, mtvec
   CHECK_REG(68, a0, s1)
-  addi a2, s1, 3                       /* MODE = 3 (CLIC in Phase 2) */
+  addi a2, s1, 3                       /* MODE = 3: CLIC mode (step 2.2d, D-035) */
   csrw mtvec, a2
   csrr a0, mtvec
-  CHECK_REG(69, a0, s1)
+  CHECK_REG(69, a0, a2)
+  csrw mtvec, s1                       /* back to CLINT (Direct) mode for the traps below */
   li   a2, 0x12345679
   csrw mepc, a2
   csrr a0, mepc

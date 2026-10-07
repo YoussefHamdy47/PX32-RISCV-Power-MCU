@@ -382,10 +382,10 @@
 # commit qualification is in the px_csr top
 
 
-[S08] rtl/core/px_csr_m.sv tb_px_csr
-- assign w_base = wval[31:2];
-+ assign w_base = wval[29:0];
-# mtvec BASE taken from the wrong bits
+[S08] rtl/core/px_csr_clic.sv tb_px_csr
+- assign w_base  = w_clic ? {w_hi6, 4'b0000} : wval[31:2];
++ assign w_base  = w_clic ? {w_hi6, 4'b0000} : wval[29:0];
+# mtvec BASE taken from the wrong bits (retargeted in step 2.2d: mtvec moved to px_csr_clic)
 
 [S09] rtl/core/px_csr_m.sv tb_px_csr
 - assign minstret_hi_inc = minstret_hi_q + {31'd0, &minstret_lo_q};
@@ -397,10 +397,11 @@
 + minstret_hi_q <= w_minstreth ? wval : (w_minstret ? minstret_hi_q : instret_hi);
 # a minstret write drops the carry of an older instruction retiring in the same cycle
 
-[S11] rtl/core/px_csr_m.sv tb_px_csr
-- assign w_irq  = wval[31];
-+ assign w_irq  = wval[30];
-# mcause interrupt bit written from the wrong bit
+[S11] rtl/core/px_csr_clic.sv tb_px_csr
+- assign w_irq   = wval[31];
++ assign w_irq   = wval[30];
+# mcause interrupt bit written from the wrong bit (retargeted in step 2.2d: mcause moved to
+# px_csr_clic)
 
 [S12] rtl/core/px_csr_m.sv tb_px_csr
 - if (a >= CSR_MHPMCOUNTER3  && a <= CSR_MHPMCOUNTER31)  e = 1'b1;
@@ -445,6 +446,158 @@
 + assign ex_hit_o = 1'b1;
 # px_csr_m claims every EX address: no read value changes (its data is 0 outside its
 # addresses), only the ownership check sees it
+
+# ------------------------------------------------------------------ px_csr_clic (step 2.2d, D-035)
+[N01] rtl/core/px_csr_clic.sv tb_px_csr
+- (irq_level_i > mpil_q) && (irq_level_i > th_q);
++ (irq_level_i > mil_q) && (irq_level_i > th_q);
+# mnxti compares the winner with mil instead of mpil (D-034 item 10): inside a handler the
+# tail-chaining loop misses interrupts between mpil and mil
+
+[N02] rtl/core/px_csr_clic.sv tb_px_csr
+- assign nxt_ok = mode_q && irq_valid_i && !irq_shv_i &&
++ assign nxt_ok = mode_q && irq_valid_i &&
+# mnxti returns and claims a hardware-vectored winner (K-75)
+
+[N03] rtl/core/px_csr_clic.sv tb_px_csr
+- (irq_level_i > mpil_q) && (irq_level_i > th_q);
++ (irq_level_i > mpil_q);
+# mnxti ignores mintthresh (K-51 critical sections broken for mnxti)
+
+[N04] rtl/core/px_csr_clic.sv tb_px_csr
+- (irq_level_i > mpil_q) && (irq_level_i > th_q);
++ (irq_level_i >= mpil_q) && (irq_level_i > th_q);
+# mnxti returns a winner at the saved level (strictly greater required)
+
+[N05] rtl/core/px_csr_clic.sv tb_px_csr
+- assign claim_o    = we && is_mnxti && nxt_ok;
++ assign claim_o    = ex_commit_i && is_mnxti && nxt_ok;
+# csrr mnxti (no write) claims the interrupt
+
+[N06] rtl/core/px_csr_clic.sv tb_px_csr
+- assign nxt_ok = mode_q && irq_valid_i && !irq_shv_i &&
++ assign nxt_ok = irq_valid_i && !irq_shv_i &&
+# mnxti returns a pointer and claims in CLINT mode (K-37)
+
+[N07] rtl/core/px_csr_clic.sv tb_px_csr
+- mc_irq_q  <= 1'b1;
++ mc_irq_q  <= mc_irq_q;
+# an mnxti claim does not set mcause.interrupt
+
+[N08] rtl/core/px_csr_clic.sv tb_px_csr
+- mil_q     <= irq_level_i;\n          exccode_q <= irq_id_i;
++ mil_q     <= mpil_q;\n          exccode_q <= irq_id_i;
+# an mnxti claim does not raise mil to the claimed level
+
+[N09] rtl/core/px_csr_clic.sv tb_px_csr
+- assign cswl_swap = mode_q && ((mpil_q == 8'd0) != (mil_q == 8'd0));
++ assign cswl_swap = mode_q && ((mpil_q == 8'd0) == (mil_q == 8'd0));
+# mscratchcswl swaps when it should not and vice versa (K-41)
+
+[N10] rtl/core/px_csr_clic.sv tb_px_csr
+- assign cswl_swap = mode_q && ((mpil_q == 8'd0) != (mil_q == 8'd0));
++ assign cswl_swap = ((mpil_q == 8'd0) != (mil_q == 8'd0));
+# mscratchcswl swaps in CLINT mode (mil and mpil must read as 0 there)
+
+[N11] rtl/core/px_csr_clic.sv tb_px_csr
+- if (mode_q && !w_clic) begin     // leaving CLIC mode zeroes pil and inhv
++ if (1'b0) begin                  // leaving CLIC mode zeroes pil and inhv
+# leaving CLIC mode keeps mpil and minhv (K-34: they must be zeroed)
+
+[N12] rtl/core/px_csr_clic.sv tb_px_csr
+- mpil_q  <= mil_q;\n        if (trap_irq_i) mil_q <= irq_level_i;
++ mpil_q  <= mpil_q;\n        if (trap_irq_i) mil_q <= irq_level_i;
+# a CLIC-mode trap does not save the interrupted level in mpil (K-54)
+
+[N13] rtl/core/px_csr_clic.sv tb_px_csr
+- if (trap_irq_i) mil_q <= irq_level_i;
++ if (trap_irq_i) mil_q <= mil_q;
+# an interrupt entry does not raise mil to the interrupt's level (K-54)
+
+[N14] rtl/core/px_csr_clic.sv tb_px_csr
+- if (trap_irq_i) mil_q <= irq_level_i;
++ mil_q <= irq_level_i;
+# a synchronous exception changes the level (K-56: horizontal exceptions keep it)
+
+[N15] rtl/core/px_csr_clic.sv tb_px_csr
+- if (mode_q) mil_q <= mpil_q;
++ mil_q <= mpil_q;
+# MRET restores mil in CLINT mode too
+
+[N16] rtl/core/px_csr_clic.sv tb_px_csr
+- assign w_clic  = wval[1:0] == 2'b11;
++ assign w_clic  = wval[1];
+# mtvec mode 10 selects CLIC mode instead of legalizing to 00 (K-30)
+
+[N17] rtl/core/px_csr_clic.sv tb_px_csr
+- assign w_base  = w_clic ? {w_hi6, 4'b0000} : wval[31:2];
++ assign w_base  = wval[31:2];
+# mtvec submode bits stay writable in CLIC mode (NBASE no longer 64-byte aligned)
+
+[N18] rtl/core/px_csr_clic.sv tb_px_csr
+- assign tbl_hi     = mtvt_q + {24'd0, irq_id_i[5:4]};
++ assign tbl_hi     = mtvt_q | {24'd0, irq_id_i[5:4]};
+# TBASE + 4 * id built with an OR: wrong when mtvt bits 7:6 are set and id >= 16
+
+[N19] rtl/core/px_csr_clic.sv tb_px_csr
+- : {mc_irq_q, 26'd0, exc5};\n
++ : {mc_irq_q, 25'd0, exccode_q};\n
+# the CLINT-format mcause shows exccode bit 5 (D-022 format keeps bits 4:0)
+
+[N20] rtl/core/px_csr_clic.sv tb_px_csr
+- assign side_mpie_we_o     = ex_write_i && is_mcause && mode_q;
++ assign side_mpie_we_o     = 1'b0;
+# a CLIC-format mcause write does not write the mpie alias (mstatus.MPIE)
+
+[N21] rtl/core/px_csr_clic.sv tb_px_csr
+- assign nxt_mie = (ex_op_i == CSR_RC) ? (m_mie_i && !ex_operand_i[3]) : (m_mie_i || ex_operand_i[3]);
++ assign nxt_mie = (ex_op_i == CSR_RC) ? (m_mie_i && !ex_operand_i[3]) : ex_operand_i[3];
+# csrrsi mnxti overwrites MIE instead of setting it
+
+[N22] rtl/core/px_csr_clic.sv tb_px_csr
+- CSR_MINTTHRESH:   ex_rdata_o = mode_q ? {24'd0, th_q} : 32'd0;
++ CSR_MINTTHRESH:   ex_rdata_o = {24'd0, th_q};
+# mintthresh reads its value in CLINT mode (draft: new CLIC CSRs appear zero there)
+
+[N23] rtl/core/px_csr_clic.sv tb_px_csr
+- ( id_imm_form && (id_cop == CSR_RS || id_cop == CSR_RC) &&
++ ( id_imm_form &&
+# csrrwi mnxti accepted (K-36: reserved form)
+
+[N24] rtl/core/px_csr_clic.sv tb_px_csr
+- assign cswl_ok  = !id_imm_form && id_cop == CSR_RW && !id_rd_zero_i && id_imm_i != 5'd0;
++ assign cswl_ok  = !id_imm_form && id_cop == CSR_RW && id_imm_i != 5'd0;
+# mscratchcswl with rd = x0 accepted (reserved form)
+
+[N25] rtl/core/px_csr_clic.sv tb_px_csr
+- default:          id_illegal_o = id_write_i && id_ro;
++ default:          id_illegal_o = 1'b0;
+# a write to mintstatus (read-only space) accepted
+
+[N26] rtl/core/px_csr_clic.sv tb_px_csr
+- assign side_mcause_we_o     = nxt_claim || leave_clic;
++ assign side_mcause_we_o     = nxt_claim;
+# the retirement interface misses the mcause change of a mtvec write that leaves CLIC mode
+
+[N27] rtl/core/px_csr_clic.sv tb_px_csr
+- assign claim_id_o = irq_id_i;
++ assign claim_id_o = exccode_q;
+# the claim names the wrong id (O3)
+
+[N28] rtl/core/px_csr_clic.sv tb_px_csr
+- assign side_mintstatus_o    = {irq_level_i, 24'd0};
++ assign side_mintstatus_o    = {mil_q, 24'd0};
+# the trace reports mintstatus before the claim instead of after it
+
+[N29] rtl/core/px_csr.sv tb_px_csr
+- .side_mie_we_i      (commit_u && s_mie_we),
++ .side_mie_we_i      (s_mie_we),
+# the mnxti side write of MIE happens without a commit (held or trapping mnxti changes MIE)
+
+[N30] rtl/core/px_csr.sv tb_px_csr
+- s_mie_we ? s_mie : mstatus_mie_o, 3'd0};
++ mstatus_mie_o, 3'd0};
+# the mstatus trace slot shows MIE before the mnxti write
 
 # ------------------------------------------------------------------ CSR integration (step 1.6)
 [K01] rtl/core/px_core.sv tb_core
@@ -640,9 +793,9 @@
 # load/store access-fault mtval loses the byte offset (the bus request is word aligned);
 # survived every bench until t06 cases 14-15 (pre-Phase 2 audit)
 
-[P22] rtl/core/px_csr_m.sv tb_core
--       CSR_MTVEC:     ex_wdata_o = {w_base, 2'b00};
-+       CSR_MTVEC:     ex_wdata_o = wval;
+[P22] rtl/core/px_csr_clic.sv tb_core
+-       CSR_MTVEC:      ex_wdata_o = {w_base, {2{w_clic}}};
++       CSR_MTVEC:      ex_wdata_o = wval;
 # retirement trace reports the unlegalized mtval write (MODE bits); only the CSR-write
 # fields of the retirement comparison see it (step 1.9 preparation, D-025)
 

@@ -3,9 +3,12 @@
 
 PX32 side (tb/compliance/tb_compliance.sv +trace), one line per event in program order:
   retirement: pc insn rd value csr_we csr_addr csr_value mem_addr rmask wmask wdata
+              [csr value ...]
               (hex; rd 0 = no register write; memory: byte address, byte lanes of the word,
-              store data on its lanes)
-  trap:       trap cause epc tval                             (hex)
+              store data on its lanes; since step 2.2d, D-035, one "csr value" pair per write
+              of another CSR: mstatus 300, mscratch 340, mcause 342, mintstatus fb1, at most
+              three, in that order)
+  trap:       trap cause epc tval                             (hex; cause up to 63)
 The bench stops at the retirement of the first word store of a nonzero value to the halt
 address (tohost), and that store is the last line.
 
@@ -26,7 +29,10 @@ Fail closed: a missing or empty trace, any line either parser does not recognise
 retirement/trap where the other side has the other kind, a length difference, a missing
 halt store on either side (the first difference before the end of Spike's log is still
 reported), an interrupt in the Spike log, or more than one register write in one Spike commit
-is a failure. The first mismatch is reported with the preceding events of
+is a failure. Since step 2.2d (D-035) also: a PX32 retirement that reports writes of other
+CSRs (mnxti, mscratchcswl, a CLIC-format mcause write, leaving CLIC mode: CLIC behaviour,
+which Spike does not model and a CLINT-mode program cannot produce), and a PX32 trap cause
+above 31 (an interrupt id: no interrupt source exists in tb_compliance). The first mismatch is reported with the preceding events of
 both sides and Spike's disassembly of the instruction.
 
 Masks (the only values not compared exactly; each is counted and reported, D-026):
@@ -122,17 +128,22 @@ def parse_dut(path):
             if len(f) == 4 and f[0] == "trap":
                 ev.append({"k": "trap", "cause": int(f[1], 16), "epc": int(f[2], 16),
                            "tval": int(f[3], 16), "src": f"dut:{n}"})
-            elif len(f) == 11:
-                pc, insn, rd, val, we, ca, cv, ma, rm, wm, wd = f
+            elif len(f) in (11, 13, 15, 17):
+                pc, insn, rd, val, we, ca, cv, ma, rm, wm, wd = f[:11]
                 if we not in ("0", "1"):
                     raise ValueError
                 rm, wm = int(rm, 16), int(wm, 16)
                 if rm and wm:
                     raise ValueError
+                side = [(int(f[k], 16), int(f[k + 1], 16)) for k in range(11, len(f), 2)]
+                order = [0x300, 0x340, 0x342, 0xFB1]
+                if any(a not in order for a, _ in side) or [a for a, _ in side] != sorted(
+                        (a for a, _ in side), key=order.index) or len({a for a, _ in side}) != len(side):
+                    raise ValueError
                 ev.append({"k": "ret", "pc": int(pc, 16), "insn": int(insn, 16), "rd": int(rd),
                            "val": int(val, 16), "csr": (int(ca, 16), int(cv, 16)) if we == "1" else None,
                            "mem": (int(ma, 16), rm, wm, int(wd, 16)) if rm or wm else None,
-                           "src": f"dut:{n}"})
+                           "side": side, "src": f"dut:{n}"})
             else:
                 raise ValueError
         except ValueError:
@@ -359,6 +370,8 @@ def compare(dut, ref, dis=None, context=6):
                               f"spike a {'trap' if r['k'] == 'trap' else 'retirement'}")
         if d["k"] == "trap":
             st["traps"] += 1
+            if d["cause"] > 31:
+                return fail(i, j, f"px32 trap cause {d['cause']:x} is above 31 (a CLIC interrupt id)")
             for f in ("cause", "epc", "tval"):
                 if d[f] != r[f]:
                     return fail(i, j, f"trap {f}: px32 {d[f]:x}, spike {r[f]:x}")
@@ -366,6 +379,10 @@ def compare(dut, ref, dis=None, context=6):
             i, j = i + 1, j + 1
             continue
         st["retirements"] += 1
+        if d.get("side"):
+            return fail(i, j, "px32 reports writes of other CSRs ("
+                              + ", ".join(f"{a:03x}={v:08x}" for a, v in d["side"])
+                              + "): CLIC behaviour, not modelled by Spike")
         if d["pc"] != r["pc"]:
             return fail(i, j, "pc differs")
         if d["insn"] != r["insn"]:
@@ -732,6 +749,26 @@ def _fixtures():
         "bm_taint_to_address": (dm.replace("006303b3 7 000008ac", "200322b3 5 000008ac"),     # sh1add x5, x6, x0
                                 sm.replace("(0x006303b3) x7  0x00000246", "(0x200322b3) x5  0x00000246"),
                                 'reached a memory address'),
+        # step 2.2d (D-035): side writes of other CSRs and 6-bit trap causes (CLIC only)
+        "side_write_reported": (du.replace("10000042 b0002373 6 00000123 0 000 00000000",
+                                           "10000042 b0002373 6 00000123 0 000 00000000 00000000 0 0 00000000 300 00001808"),
+                                sp, 'writes of other CSRs'),
+        "side_write_three": (du.replace("10000042 b0002373 6 00000123 0 000 00000000",
+                                        "10000042 b0002373 6 00000123 0 000 00000000 00000000 0 0 00000000"
+                                        " 300 00001808 342 b0300011 fb1 4f000000"),
+                             sp, 'writes of other CSRs'),
+        "side_write_odd_fields": (du.replace("10000042 b0002373 6 00000123 0 000 00000000",
+                                             "10000042 b0002373 6 00000123 0 000 00000000 00000000 0 0 00000000 300"),
+                                  sp, 'unparsed PX32 trace line'),
+        "side_write_wrong_order": (du.replace("10000042 b0002373 6 00000123 0 000 00000000",
+                                              "10000042 b0002373 6 00000123 0 000 00000000 00000000 0 0 00000000"
+                                              " 342 b0300011 300 00001808"),
+                                   sp, 'unparsed PX32 trace line'),
+        "side_write_unknown_csr": (du.replace("10000042 b0002373 6 00000123 0 000 00000000",
+                                              "10000042 b0002373 6 00000123 0 000 00000000 00000000 0 0 00000000 305 10000043"),
+                                   sp, 'unparsed PX32 trace line'),
+        "trap_cause_above_31": (du.replace("trap 2 10000008 00000000", "trap 2a 10000008 00000000"),
+                                sp, 'above 31'),
     }
 
 

@@ -99,7 +99,7 @@ package px_pkg;
   localparam logic [11:0] IMM_REV8  = 12'h698;   // RV32 encoding (RV64 rev8 is 0x6B8)
 
   // ---------------------------------------------------------------------------
-  // CSR addresses (machine mode subset, ARCHITECTURE.md § 4.3 adds CLIC CSRs later)
+  // CSR addresses (machine mode subset; CLIC CSRs since step 2.2d)
   // ---------------------------------------------------------------------------
   localparam logic [11:0] CSR_FFLAGS    = 12'h001;
   localparam logic [11:0] CSR_FRM       = 12'h002;
@@ -135,6 +135,14 @@ package px_pkg;
   // 0x3B0..0x3EF (one contiguous range)
   localparam logic [11:0] CSR_PMPCFG0       = 12'h3A0;
   localparam logic [11:0] CSR_PMPADDR63     = 12'h3EF;
+  // CLIC CSRs (pinned CLIC draft 0.9, "CLIC CSRs"; step 2.2d, D-035). mscratchcsw (0x348)
+  // exists only with U-mode (step 2.6) and is illegal until then.
+  localparam logic [11:0] CSR_MTVT          = 12'h307;
+  localparam logic [11:0] CSR_MNXTI         = 12'h345;
+  localparam logic [11:0] CSR_MINTTHRESH    = 12'h347;
+  localparam logic [11:0] CSR_MSCRATCHCSW   = 12'h348;
+  localparam logic [11:0] CSR_MSCRATCHCSWL  = 12'h349;
+  localparam logic [11:0] CSR_MINTSTATUS    = 12'hFB1;
 
   // misa (read-only, D-022; D-028): MXL = 32 (bits 31:30 = 01), extensions I (bit 8),
   // M (12), C (2) and B (1: Zba, Zbb and Zbs all implemented, privileged ISA 20240411)

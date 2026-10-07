@@ -1,27 +1,29 @@
 // px_csr_m: machine-mode CSR sub-unit of px_csr (Phase 1 step 1.6, split out in Phase 2
-// step 2.2a).
+// step 2.2a; mtvec and mcause moved to px_csr_clic in step 2.2d).
 //
 // Implements IMPLEMENTATION_GUIDE.md step 1.6 and IMPLEMENTATION_CONTRACTS.md § 1 (RISC-V
 // privileged manual release 20240411, machine mode only; Zicsr 2.0). Field choices,
 // reset values and counter semantics are recorded in DECISIONS.md D-022. Sub-unit of the
 // px_csr top (PHASE2_ARCHITECTURE.md § 5; the port subset, the commit qualification and
 // the top's combining rules are recorded in D-032). The code was moved unchanged from the
-// Phase 1 px_csr; a formal miter proves the top plus this unit equivalent to it.
+// Phase 1 px_csr in step 2.2a; step 2.2d (D-035) moved mtvec and mcause to px_csr_clic and
+// added the side writes. A formal miter proves the step 2.2d px_csr equivalent to the step
+// 2.2c one in CLINT mode (tb/formal/px_csr_clint_equiv.sby).
 //
 // Implemented CSRs (this unit hits exactly these addresses; no other unit owns them):
 //   mstatus   0x300  MIE (3) and MPIE (7) writable; MPP (12:11) reads 11 (M is the only
-//                    mode); MPRV, TW, SUM, MXR, TVM, TSR, FS, VS, XS, SD read-only 0
+//                    mode); MPRV, TW, SUM, MXR, TVM, TSR, FS, VS, XS, SD read-only 0;
+//                    MIE also written by mnxti, MPIE by the mcause.mpie alias (side writes)
 //   misa      0x301  px_pkg::MISA_VALUE = 0x4000_1106: MXL = 32, I, M, C and B (M since
 //                    step 1.7, D-023; B since step 2.1, D-028); writes are ignored (WARL,
 //                    fixed value)
-//   mie, mip  0x304, 0x344  read-only 0: no interrupt can become pending before the
-//                    Phase 2 CLIC ("bits of mie that are not writable must be read-only
-//                    zero"); writes are ignored, not illegal
-//   mtvec     0x305  BASE[31:2] writable; MODE reads 0 (Direct only; CLIC mode is Phase 2)
+//   mie, mip  0x304, 0x344  read-only 0 in both interrupt modes: in CLINT mode no
+//                    interrupt source exists ("bits of mie that are not writable must be
+//                    read-only zero"), in CLIC mode the draft hardwires them to 0; writes
+//                    are ignored, not illegal (D-022, K-33)
 //   mstatush  0x310  read-only 0 (little-endian only: MBE = SBE = 0)
-//   mscratch  0x340  32-bit read/write
+//   mscratch  0x340  32-bit read/write; also written by the mscratchcswl swap (side write)
 //   mepc      0x341  bit 0 reads 0 (IALIGN = 16, C is always enabled)
-//   mcause    0x342  interrupt bit 31 and exception code [4:0] kept (WLRL), others read 0
 //   mtval     0x343  32-bit read/write
 //   mcycle(h), minstret(h)  0xB00/0xB80, 0xB02/0xB82: 64-bit counters, see below
 //   mhpmcounter3..31(h), mhpmevent3..31: read-only 0, writes ignored (legal per spec)
@@ -58,16 +60,23 @@
 //   The high halves carry from the low halves; writing one half never changes the other
 //   except through that carry.
 //
-// Traps: trap_i writes mepc = trap_pc_i, mcause, mtval, MPIE = MIE, MIE = 0. MRET
-// (mret_i) sets MIE = MPIE, MPIE = 1 (MPP stays M). trap_i wins over mret_i.
+// Traps: trap_i writes mepc = trap_pc_i, mtval, MPIE = MIE, MIE = 0 (mcause lives in
+// px_csr_clic since step 2.2d). MRET (mret_i) sets MIE = MPIE, MPIE = 1 (MPP stays M).
+// trap_i wins over mret_i.
+//
+// Side writes (step 2.2d, DECISIONS.md D-035 item 2): px_csr_clic changes state of this unit
+// through side_*_i, already qualified by the top's commit: mstatus.MIE (mnxti), mstatus.MPIE
+// (the mpie alias of a CLIC-format mcause write) and mscratch (mscratchcswl swap). They are
+// applied at the same edge as an ordinary write; an ordinary write of this unit cannot
+// happen in the same cycle (the instruction addresses a CSR of px_csr_clic).
 //
 // Latency: reads are combinational; every update is visible on the next cycle, i.e. to
-// the next instruction in EX. Outputs mtvec_o and mepc_o are register outputs.
+// the next instruction in EX. Outputs mepc_o, mstatus_mie_o, mstatus_mpie_o and mscratch_o
+// are register outputs.
 
 `timescale 1ns/1ps
 
 module px_csr_m #(
-  parameter logic [31:0] MTVEC_RESET = 32'h1000_0040,
   parameter logic [31:0] MIMPID      = 32'd0
 ) (
   input  logic        clk_i,
@@ -96,17 +105,24 @@ module px_csr_m #(
 
   // Trap entry and return
   input  logic        trap_i,
-  input  logic        trap_irq_i,     // interrupt bit of mcause (0 in Phase 1)
-  input  logic [4:0]  trap_cause_i,
   /* verilator lint_off UNUSEDSIGNAL */
   input  logic [31:0] trap_pc_i,      // bit 0 is always 0 (IALIGN = 16); mepc[0] reads 0
   /* verilator lint_on UNUSEDSIGNAL */
   input  logic [31:0] trap_tval_i,
   input  logic        mret_i,
 
-  output logic [31:0] mtvec_o,        // trap target (Direct mode: BASE)
+  // Side writes from px_csr_clic (qualified by the top's commit; D-035 item 2)
+  input  logic        side_mie_we_i,
+  input  logic        side_mie_i,
+  input  logic        side_mpie_we_i,
+  input  logic        side_mpie_i,
+  input  logic        side_mscratch_we_i,
+  input  logic [31:0] side_mscratch_i,
+
   output logic [31:0] mepc_o,         // MRET target
-  output logic        mstatus_mie_o   // for Phase 2 interrupt gating
+  output logic        mstatus_mie_o,  // interrupt eligibility
+  output logic        mstatus_mpie_o, // mcause.mpie alias (px_csr_clic)
+  output logic [31:0] mscratch_o      // mscratchcswl swap (px_csr_clic)
 );
 
   import px_pkg::*;
@@ -118,8 +134,8 @@ module px_csr_m #(
     logic e;
     e = 1'b0;
     case (a)
-      CSR_MSTATUS, CSR_MISA, CSR_MIE, CSR_MTVEC, CSR_MSTATUSH,
-      CSR_MSCRATCH, CSR_MEPC, CSR_MCAUSE, CSR_MTVAL, CSR_MIP,
+      CSR_MSTATUS, CSR_MISA, CSR_MIE, CSR_MSTATUSH,
+      CSR_MSCRATCH, CSR_MEPC, CSR_MTVAL, CSR_MIP,
       CSR_MCYCLE, CSR_MINSTRET, CSR_MCYCLEH, CSR_MINSTRETH,
       CSR_MVENDORID, CSR_MARCHID, CSR_MIMPID, CSR_MHARTID, CSR_MCONFIGPTR: e = 1'b1;
       default: e = 1'b0;
@@ -141,11 +157,8 @@ module px_csr_m #(
   // State
   // ---------------------------------------------------------------------------
   logic        mie_q, mpie_q;
-  logic [29:0] mtvec_base_q;
   logic [31:0] mscratch_q, mtval_q;
   logic [30:0] mepc_q;          // mepc[31:1]
-  logic        mcause_irq_q;
-  logic [4:0]  mcause_code_q;
   logic [31:0] mcycle_lo_q, mcycle_hi_q, minstret_lo_q, minstret_hi_q;
 
   // Counter increments, split per half so the high adder waits only for an AND tree.
@@ -170,10 +183,8 @@ module px_csr_m #(
     case (ex_addr_i)
       CSR_MSTATUS:   ex_rdata_o = mstatus_val;
       CSR_MISA:      ex_rdata_o = MISA_VALUE;
-      CSR_MTVEC:     ex_rdata_o = {mtvec_base_q, 2'b00};
       CSR_MSCRATCH:  ex_rdata_o = mscratch_q;
       CSR_MEPC:      ex_rdata_o = {mepc_q, 1'b0};
-      CSR_MCAUSE:    ex_rdata_o = {mcause_irq_q, 26'd0, mcause_code_q};
       CSR_MTVAL:     ex_rdata_o = mtval_q;
       CSR_MCYCLE:    ex_rdata_o = mcycle_lo_q;
       CSR_MCYCLEH:   ex_rdata_o = mcycle_hi_q;
@@ -203,16 +214,11 @@ module px_csr_m #(
   assign ex_noinc_o = ex_write_i && (ex_addr_i == CSR_MINSTRET || ex_addr_i == CSR_MINSTRETH);
 
   // Legalized fields of the written value (continuous assigns: guide § 3.3)
-  logic        w_mie, w_mpie, w_irq;
-  logic [29:0] w_base;
+  logic        w_mie, w_mpie;
   logic [30:0] w_epc;
-  logic [4:0]  w_code;
   assign w_mie  = wval[MSTATUS_MIE];
   assign w_mpie = wval[MSTATUS_MPIE];
-  assign w_base = wval[31:2];
   assign w_epc  = wval[31:1];
-  assign w_irq  = wval[31];
-  assign w_code = wval[4:0];
 
   // Value of the written CSR after the write, as a read would return it (WARL legalization
   // as in the update below; counters take the written value; ignored writes read back the
@@ -221,10 +227,8 @@ module px_csr_m #(
     case (ex_addr_i)
       CSR_MSTATUS:   ex_wdata_o = {19'd0, 2'b11, 3'd0, w_mpie, 3'd0, w_mie, 3'd0};
       CSR_MISA:      ex_wdata_o = MISA_VALUE;
-      CSR_MTVEC:     ex_wdata_o = {w_base, 2'b00};
       CSR_MSCRATCH:  ex_wdata_o = wval;
       CSR_MEPC:      ex_wdata_o = {w_epc, 1'b0};
-      CSR_MCAUSE:    ex_wdata_o = {w_irq, 26'd0, w_code};
       CSR_MTVAL:     ex_wdata_o = wval;
       CSR_MCYCLE, CSR_MCYCLEH, CSR_MINSTRET, CSR_MINSTRETH: ex_wdata_o = wval;
       default:       ex_wdata_o = 32'd0;    // read-only zero registers
@@ -241,33 +245,32 @@ module px_csr_m #(
     if (!rst_ni) begin
       mie_q         <= 1'b0;
       mpie_q        <= 1'b0;
-      mtvec_base_q  <= MTVEC_RESET[31:2];
       mscratch_q    <= 32'd0;
       mepc_q        <= 31'd0;
-      mcause_irq_q  <= 1'b0;
-      mcause_code_q <= 5'd0;
       mtval_q       <= 32'd0;
     end else if (trap_i) begin
       mpie_q        <= mie_q;
       mie_q         <= 1'b0;
       mepc_q        <= trap_epc;
-      mcause_irq_q  <= trap_irq_i;
-      mcause_code_q <= trap_cause_i;
       mtval_q       <= trap_tval_i;
     end else if (mret_i) begin
       mie_q         <= mpie_q;
       mpie_q        <= 1'b1;
-    end else if (we) begin
-      // Other implemented addresses (misa, mie, mip, mstatush, hpm, PMP) ignore writes.
-      case (ex_addr_i)
-        CSR_MSTATUS:  begin mie_q <= w_mie; mpie_q <= w_mpie; end
-        CSR_MTVEC:    mtvec_base_q <= w_base;
-        CSR_MSCRATCH: mscratch_q   <= wval;
-        CSR_MEPC:     mepc_q       <= w_epc;
-        CSR_MCAUSE:   begin mcause_irq_q <= w_irq; mcause_code_q <= w_code; end
-        CSR_MTVAL:    mtval_q      <= wval;
-        default: ;
-      endcase
+    end else begin
+      if (we) begin
+        // Other implemented addresses (misa, mie, mip, mstatush, hpm, PMP) ignore writes.
+        case (ex_addr_i)
+          CSR_MSTATUS:  begin mie_q <= w_mie; mpie_q <= w_mpie; end
+          CSR_MSCRATCH: mscratch_q   <= wval;
+          CSR_MEPC:     mepc_q       <= w_epc;
+          CSR_MTVAL:    mtval_q      <= wval;
+          default: ;
+        endcase
+      end
+      // side writes (never in the same cycle as a write of this unit's own CSRs)
+      if (side_mie_we_i)      mie_q      <= side_mie_i;
+      if (side_mpie_we_i)     mpie_q     <= side_mpie_i;
+      if (side_mscratch_we_i) mscratch_q <= side_mscratch_i;
     end
   end
 
@@ -295,8 +298,9 @@ module px_csr_m #(
     end
   end
 
-  assign mtvec_o       = {mtvec_base_q, 2'b00};
-  assign mepc_o        = {mepc_q, 1'b0};
-  assign mstatus_mie_o = mie_q;
+  assign mepc_o         = {mepc_q, 1'b0};
+  assign mstatus_mie_o  = mie_q;
+  assign mstatus_mpie_o = mpie_q;
+  assign mscratch_o     = mscratch_q;
 
 endmodule
