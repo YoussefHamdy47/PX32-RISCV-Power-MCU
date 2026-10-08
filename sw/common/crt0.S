@@ -21,7 +21,11 @@
  * TF_IRQ_ID, and the handler returns to mepc unchanged (the interrupted instruction runs
  * again; nothing is skipped), or once to TF_IRQ_RESUME if a test armed it (code that sets
  * mepc and executes MRET with MIE = 1 needs this: an interrupt in between overwrites
- * mepc). The flag only adds code, so programs built without it do not change. */
+ * mepc). The flag only adds code, so programs built without it do not change.
+ * Since step 2.2d (D-035) interrupts exist only in CLIC mode (mtvec = trap_entry | 3: the
+ * vector is 64-byte aligned): with PX_IRQ_RESUME the handler clears the interrupt's edge
+ * pending bit in the CLIC (clicintip[exccode]) before it returns, and compares exception
+ * codes without the CLIC mcause fields. */
 #include "px_test.h"
 
   .section .text.init, "ax"
@@ -62,8 +66,14 @@ trap_entry:
   bltz t0, trap_fatal            /* interrupt: none exist before Phase 2 */
   lw   t2, TF_RESUME(sp)
   bnez t2, trap_resume           /* 1. armed recovery address */
+#ifdef PX_IRQ_RESUME
+  andi t2, t0, 0x3F              /* exception code only: a CLIC-mode mcause also carries */
+  addi t2, t2, -CAUSE_IACCESS    /* mpp, mpie and mpil (step 2.2d, D-035) */
+  beqz t2, trap_fatal            /* 3. fetch fault: nothing to skip */
+#else
   li   t2, CAUSE_IACCESS
   beq  t0, t2, trap_fatal        /* 3. fetch fault: nothing to skip */
+#endif
   lhu  t2, 0(t1)                 /* 2. skip the trapping instruction */
   andi t2, t2, 3
   addi t1, t1, 2
@@ -90,6 +100,11 @@ trap_fatal:
   addi t2, t2, 1
   sw   t2, TF_IRQS(sp)
   sw   t0, TF_IRQ_ID(sp)
+  andi t2, t0, 0x3F              /* CLIC mode (step 2.2d): clear the edge pending bit of */
+  slli t2, t2, 2                 /* the interrupt (non-vectored edge interrupts are cleared */
+  li   t1, CLIC_INTIP            /* by software; a level input ignores the store); t1 is */
+  add  t1, t1, t2                /* free: mepc stays in its CSR */
+  sb   zero, 0(t1)
   lw   t2, TF_IRQ_RESUME(sp)     /* armed interrupt resume address (one use) */
   beqz t2, trap_return           /* mepc unchanged: resume the interrupted instruction */
   sw   zero, TF_IRQ_RESUME(sp)

@@ -58,14 +58,29 @@
 //     CSR/MRET commit, ID JAL.
 //   - In the take cycle ID and EX are flushed, the divider is killed, nothing in EX
 //     commits (CSR write, MRET, multiplier stage 1, data request), the WB instruction
-//     retires, IF is redirected to mtvec BASE, and px_csr enters the trap with
-//     mepc = oldest unretired pc (EX, else ID, else the fetch pc), mcause = interrupt bit
-//     and irq_id_i[4:0], mtval = 0.
+//     retires, IF is redirected to mtvec BASE (NBASE in CLIC mode), and px_csr enters the
+//     trap with
+//     mepc = oldest unretired pc (EX, else ID, else the fetch pc), trap cause = irq_id_i
+//     (6 bits since step 2.2d), mtval = 0.
 //   - Latency with single-cycle memories: request registered at edge 1 (cycle 0 = the
 //     source's pending flop), take in cycle 1, first handler instruction in EX in cycle 4.
 //
+// CLIC integration (Phase 2 step 2.2d, DECISIONS.md D-035; PHASE2_ARCHITECTURE.md §§ 4.4-4.8)
+//   - The request port carries px_clic's registered winner: irq_req_i (qualified by the CLIC
+//     with the core's current mil, mintthresh and mode), irq_valid_i/irq_id_i/irq_level_i/
+//     irq_shv_i (the winner whether or not it is requested; mnxti reads it). Eligibility stays
+//     irq_req_i && mstatus.MIE (D-034 obligation O2). mil_o, mintthresh_o, clic_mode_o are
+//     register outputs of px_csr (O1). irq_ack_o only with irq_req_i, for irq_id_i;
+//     irq_claim_o only for a committed mnxti write that found the presented winner (O3).
+//   - CLIC mode (mtvec.mode = 11): an interrupt sets mcause = {interrupt, minhv 0, mpp,
+//     mpie, mpil = mil, exccode = id (6 bits)} and mil = the winner's level; exceptions keep
+//     the level (mpil = mil); MRET sets mil = mpil (px_csr). Target: NBASE.
+//   - The trap cause is 6 bits (interrupt ids 0-63).
+//   - Retirement interface: rvfi_csrx_* report CSR writes besides the addressed one (mnxti,
+//     mscratchcswl, CLIC-format mcause, mtvec leaving CLIC mode): slot 0 mstatus, 1 mscratch,
+//     2 mcause, 3 mintstatus (D-035 item 12).
 // Staged features (tracked in PROGRESS.md)
-//   - CLIC mode, vectoring, levels and mnxti: Phase 2 step 2.2d.
+//   - Hardware vectoring (smclicshv table fetch in IF): step 2.2d part D.
 //   WFI executes as a NOP (allowed by the privileged spec); FENCE is a NOP (in-order
 //   core, no caches); FENCE.I refetches everything after it.
 
@@ -97,14 +112,21 @@ module px_core #(
   input  logic [31:0] data_rdata_i,
   input  logic        data_err_i,
 
-  // Interrupt request (PHASE2_ARCHITECTURE.md § 9.1; D-033): registered winner of the
-  // interrupt controller, and the take acknowledge for it
-  input  logic        irq_req_i,
-  /* verilator lint_off UNUSEDSIGNAL */
-  input  logic [5:0]  irq_id_i,       // bit 5 reaches mcause in step 2.2d (D-033 item 6)
-  /* verilator lint_on UNUSEDSIGNAL */
+  // Interrupt controller (PHASE2_ARCHITECTURE.md § 9.1; D-033, D-034, D-035): registered
+  // winner of px_clic, the take acknowledge and the mnxti claim for it, and the core state
+  // px_clic qualifies its request with (register outputs)
+  input  logic        irq_req_i,      // winner requested (above mil and mintthresh, CLIC mode)
+  input  logic        irq_valid_i,    // a pending-and-enabled winner exists (mnxti)
+  input  logic [5:0]  irq_id_i,
+  input  logic [7:0]  irq_level_i,
+  input  logic        irq_shv_i,
   output logic        irq_ack_o,      // an interrupt is taken in this cycle
   output logic [5:0]  irq_ack_id_o,   // ... with this id
+  output logic        irq_claim_o,    // a committed mnxti write claimed the winner
+  output logic [5:0]  irq_claim_id_o, // ... with this id
+  output logic [7:0]  mil_o,
+  output logic [7:0]  mintthresh_o,
+  output logic        clic_mode_o,
 
   // Retirement trace (one entry per retired instruction, in program order)
   output logic        rvfi_valid_o,
@@ -120,12 +142,14 @@ module px_core #(
   output logic        rvfi_csr_we_o,      // the retiring instruction wrote a CSR
   output logic [11:0] rvfi_csr_addr_o,
   output logic [31:0] rvfi_csr_wdata_o,   // value of that CSR after the write
+  output logic [3:0]  rvfi_csrx_we_o,     // other CSRs written: mstatus, mscratch, mcause,
+  output logic [127:0] rvfi_csrx_wdata_o, // mintstatus (slot k at [32k +: 32], D-035)
 
   // Trap report (one pulse per trap; the trapping instruction does not retire). For an
   // interrupt (trap_irq_o) the cause is the id and the pc the interrupted instruction's.
   output logic        trap_valid_o,
   output logic        trap_irq_o,
-  output logic [4:0]  trap_cause_o,
+  output logic [5:0]  trap_cause_o,       // exception code, or the interrupt id
   output logic [31:0] trap_pc_o,
   output logic [31:0] trap_tval_o
 `ifdef RISCV_FORMAL
@@ -277,6 +301,8 @@ module px_core #(
   logic        wb_csr_we_q;
   logic [11:0] wb_csr_addr_q;
   logic [31:0] wb_csr_wdata_q;
+  logic [3:0]  wb_csrx_we_q;
+  logic [127:0] wb_csrx_wdata_q;
   logic [4:0]  wb_rd_q;
   logic        wb_rd_we_q, wb_is_load_q, wb_is_store_q, wb_unsigned_q, wb_is_mul_q;
   logic        wb_noinc_q;                 // retirement not counted in minstret (D-022)
@@ -427,6 +453,12 @@ module px_core #(
   // held, has no exception and no older instruction is failing in WB.
   logic        csr_commit, mret_commit, csr_noinc, wb_count;
   logic [31:0] csr_rdata, csr_wdata, csr_operand, ex_result;
+  logic [3:0]  csr_side_we;
+  logic [127:0] csr_side_wdata;
+  /* verilator lint_off UNUSEDSIGNAL */
+  logic        csr_minhv;                  // MRET table refetch: step 2.2d part D
+  logic [31:0] csr_tbl_addr;               // vector table entry: step 2.2d part D
+  /* verilator lint_on UNUSEDSIGNAL */
   logic [11:0] id_csr_addr, ex_csr_addr;
   logic [1:0]  ex_csr_op;
   assign id_csr_addr = dec.csr_addr;
@@ -436,10 +468,6 @@ module px_core #(
   assign csr_commit  = ex_to_wb && ex_dec_q.csr_en;
   assign mret_commit = ex_to_wb && ex_dec_q.is_mret;
 
-  // Step 2.2d part B (D-035): px_csr has the CLIC unit; the CLIC winner inputs are idle
-  // until px_clic is connected (part C), so the core stays in CLINT behaviour except for
-  // the CSR accesses themselves.
-  /* verilator lint_off PINCONNECTEMPTY */
   px_csr #(.MTVEC_RESET(MTVEC_RESET)) u_csr (
     .clk_i, .rst_ni,
     .id_addr_i    (id_csr_addr),
@@ -456,32 +484,31 @@ module px_core #(
     .ex_rdata_o   (csr_rdata),
     .ex_wdata_o   (csr_wdata),
     .ex_noinc_o   (csr_noinc),
-    .side_we_o    (),
-    .side_wdata_o (),
+    .side_we_o    (csr_side_we),
+    .side_wdata_o (csr_side_wdata),
     .retire_i     (wb_count),
     .trap_i       (trap_valid_o),
     .trap_irq_i   (trap_irq_o),
-    .trap_cause_i ({1'b0, trap_cause_o}),
+    .trap_cause_i (trap_cause_o),
     .trap_minhv_i (1'b0),
     .trap_pc_i    (trap_pc_o),
     .trap_tval_i  (trap_tval_o),
     .mret_i       (mret_commit),
-    .irq_valid_i  (1'b0),
-    .irq_id_i     (6'd0),
-    .irq_level_i  (8'd0),
-    .irq_shv_i    (1'b0),
+    .irq_valid_i,
+    .irq_id_i,
+    .irq_level_i,
+    .irq_shv_i,
     .mtvec_o      (csr_mtvec),
     .mepc_o       (csr_mepc),
     .mstatus_mie_o(csr_mie),
-    .clic_mode_o  (),
-    .mil_o        (),
-    .mintthresh_o (),
-    .minhv_o      (),
-    .tbl_addr_o   (),
-    .claim_o      (),
-    .claim_id_o   ()
+    .clic_mode_o,
+    .mil_o,
+    .mintthresh_o,
+    .minhv_o      (csr_minhv),
+    .tbl_addr_o   (csr_tbl_addr),
+    .claim_o      (irq_claim_o),
+    .claim_id_o   (irq_claim_id_o)
   );
-  /* verilator lint_on PINCONNECTEMPTY */
 
   // ===========================================================================
   // Multiplier and divider (D-023)
@@ -654,8 +681,8 @@ module px_core #(
   // irq_take excludes wb_bus_err and ex_trap, so at most one of the three is set.
   assign trap_valid_o = wb_bus_err || ex_trap || irq_take;
   assign trap_irq_o   = irq_take;
-  assign trap_cause_o = wb_bus_err ? (wb_is_load_q ? EXC_LACCESS : EXC_SACCESS) :
-                        irq_take ? irq_id_i[4:0] : ex_cause;
+  assign trap_cause_o = wb_bus_err ? {1'b0, (wb_is_load_q ? EXC_LACCESS : EXC_SACCESS)} :
+                        irq_take ? irq_id_i : {1'b0, ex_cause};
   assign trap_pc_o    = wb_bus_err ? wb_pc_q : irq_take ? irq_epc : ex_pc_q;
   assign trap_tval_o  = wb_bus_err ? wb_addr_q : irq_take ? 32'd0 : ex_tval;
   assign irq_ack_o    = irq_take;
@@ -735,6 +762,7 @@ module px_core #(
       wb_is_mul_q   <= 1'b0;
       wb_size_q     <= MEM_W;
       wb_csr_we_q   <= 1'b0; wb_csr_addr_q <= 12'd0; wb_csr_wdata_q <= 32'd0;
+      wb_csrx_we_q  <= 4'd0; wb_csrx_wdata_q <= 128'd0;
     end else if (!wb_wait) begin
       wb_valid_q    <= ex_to_wb;
       wb_pc_q       <= ex_pc_q;
@@ -754,6 +782,8 @@ module px_core #(
       wb_csr_we_q   <= ex_dec_q.csr_en && ex_dec_q.csr_write;
       wb_csr_addr_q <= ex_csr_addr;
       wb_csr_wdata_q <= csr_wdata;
+      wb_csrx_we_q  <= ex_dec_q.csr_en ? csr_side_we : 4'd0;
+      wb_csrx_wdata_q <= csr_side_wdata;
     end
   end
 
@@ -773,6 +803,8 @@ module px_core #(
   assign rvfi_csr_we_o    = wb_retire && wb_csr_we_q;
   assign rvfi_csr_addr_o  = wb_csr_we_q ? wb_csr_addr_q : 12'd0;
   assign rvfi_csr_wdata_o = wb_csr_we_q ? wb_csr_wdata_q : 32'd0;
+  assign rvfi_csrx_we_o   = wb_retire ? wb_csrx_we_q : 4'd0;
+  assign rvfi_csrx_wdata_o = wb_csrx_wdata_q;
 
 `ifdef RISCV_FORMAL
   // ===========================================================================

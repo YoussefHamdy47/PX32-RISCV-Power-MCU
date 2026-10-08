@@ -946,29 +946,65 @@ def load_hex(path):
     return out
 
 
+def eligible(m, c):
+    """The model's interrupt request in cycle c: (id, level, shv) or None."""
+    if not m.clic_mode() or m.mie != 1:
+        return None
+    m.clic.advance_to(c)
+    w = m.clic.w
+    if w is None or w[1] <= m.mil or w[1] <= m.mth:
+        return None
+    return w
+
+
 def replay_run(ev_path, prefix):
     """Check one tb_core event log against the model. Returns (errors, summary)."""
     m = Machine(load_hex(prefix + ".itcm.hex"), load_hex(prefix + ".dtcm.hex"))
     lines = Path(ev_path).read_text().splitlines()
     if not lines or not lines[-1].startswith("E "):
         return [f"{ev_path}: incomplete event log (no E line)"], ""
+    xl = [(int(f[1]), int(f[2], 16)) for f in (ln.split() for ln in lines) if f and f[0] == "X"]
+    m.clic = Clic(xl)
     n_r = n_t = n_i = 0
     last_store_tohost = False
+    elig_run = 0                              # consecutive retirement boundaries with an eligible interrupt
+    last_ex = last_ret = -1                   # stamps of the previous retirement
     errs = []
     for k, ln in enumerate(lines[:-1], 1):
         f = ln.split()
         where = f"{ev_path}:{k}"
+        if f[0] == "X":
+            continue
         try:
             if f[0] == "I":
-                code, epc = int(f[1]), int(f[2], 16)
+                code, epc, cyc = int(f[1]), int(f[2], 16), int(f[3])
                 if m.mie != 1:
                     errs.append(f"{where}: interrupt taken while mstatus.MIE = 0 (pc {m.pc:08x})")
                 if epc != m.pc:
                     errs.append(f"{where}: interrupt saved pc {epc:08x}, model next pc {m.pc:08x}")
-                m.take_interrupt(code)
+                w = eligible(m, cyc)
+                if w is None or w[0] != code:
+                    errs.append(f"{where}: interrupt {code} taken in cycle {cyc}; the model's request is {w}"
+                                f" (mode {'CLIC' if m.clic_mode() else 'CLINT'}, mil {m.mil:02x}, mintthresh {m.mth:02x})")
+                    level, shv = 0, False
+                else:
+                    level, shv = w[1], w[2]
+                m.clic.add_event(cyc, ("ack", code))
+                m.take_interrupt(code, level, shv)
                 n_i += 1
+                elig_run = 0
                 last_store_tohost = False
                 continue
+            if f[0] == "R":
+                m.stamp_ex, m.stamp_ret = int(f[17]), int(f[18])
+                # in-order pipeline: one instruction leaves EX per cycle and retires in a
+                # later cycle, one retirement per cycle (a log with inconsistent stamps
+                # would move CLIC stores, claims and inputs against each other unchecked)
+                if not (last_ex < m.stamp_ex < m.stamp_ret and last_ret < m.stamp_ret):
+                    errs.append(f"{where}: stamps ex {m.stamp_ex} retire {m.stamp_ret} inconsistent"
+                                f" (previous ex {last_ex}, retire {last_ret})")
+                    break
+                last_ex, last_ret = m.stamp_ex, m.stamp_ret
             kind, r = m.step()
         except Nondeterministic as e:
             errs.append(f"{where}: {e}")
@@ -979,26 +1015,41 @@ def replay_run(ev_path, prefix):
             if kind != "trap" or r != got:
                 errs.append(f"{where}: exception {got[0]} pc {got[1]:08x} tval {got[2]:08x}; model {kind} {r if kind == 'trap' else '%08x' % r[0]}")
             last_store_tohost = False
+            elig_run = 0
         elif f[0] == "R":
             n_r += 1
             pc, insn, rd, wd, ma = int(f[1], 16), int(f[2], 16), int(f[3]), int(f[4], 16), int(f[5], 16)
             rm, wm, md = int(f[6], 16), int(f[7], 16), int(f[8], 16)
             cw, ca, cd = int(f[9]), int(f[10], 16), int(f[11], 16)
+            sx, sv = int(f[12], 16), [int(x, 16) for x in f[13:17]]
             if kind != "retire":
                 errs.append(f"{where}: retirement pc {pc:08x}; model trap {r}")
             else:
                 (e_pc, e_insn, e_rd, e_wd, e_ma, e_rm, e_wm, e_md, e_care, e_cw, e_ca, e_cd,
-                 e_ccare) = r[:13]
+                 e_ccare, e_sx, *e_sv) = r
                 lm = sum(0xFF << (8 * b) for b in range(4) if (rm | wm) >> b & 1)
                 bad = (pc != e_pc or insn != e_insn or rd != e_rd or (wd & e_care) != (e_wd & e_care)
                        or rm != e_rm or wm != e_wm
                        or ((rm | wm) and (ma != e_ma or (md & lm & e_care) != (e_md & lm & e_care))))
                 if not bad and (cw != e_cw or (e_cw and (ca != e_ca or (cd & e_ccare) != (e_cd & e_ccare)))):
                     bad = True
+                if not bad and (sx != e_sx or any(sx >> j & 1 and sv[j] != e_sv[j] for j in range(4))):
+                    bad = True
                 if bad:
-                    errs.append(f"{where}: retirement pc {pc:08x} insn {insn:08x} x{rd}={wd:08x} mem {ma:08x} r{rm:x} w{wm:x} {md:08x} csr {cw} {ca:03x}={cd:08x}; "
-                                f"model pc {e_pc:08x} insn {e_insn:08x} x{e_rd}={e_wd:08x} mem {e_ma:08x} r{e_rm:x} w{e_wm:x} {e_md:08x} csr {e_cw} {e_ca:03x}={e_cd:08x}")
+                    errs.append(f"{where}: retirement pc {pc:08x} insn {insn:08x} x{rd}={wd:08x} mem {ma:08x} r{rm:x} w{wm:x} {md:08x} csr {cw} {ca:03x}={cd:08x} side {sx:x} {' '.join('%08x' % v for v in sv)}; "
+                                f"model pc {e_pc:08x} insn {e_insn:08x} x{e_rd}={e_wd:08x} mem {e_ma:08x} r{e_rm:x} w{e_wm:x} {e_md:08x} csr {e_cw} {e_ca:03x}={e_cd:08x} side {e_sx:x} {' '.join('%08x' % v for v in e_sv)}")
                 last_store_tohost = bool(e_wm) and e_ma == TOHOST
+            # missing take: an interrupt the model finds eligible at several consecutive
+            # retirement boundaries without a take (the core takes it within two)
+            try:
+                w = eligible(m, m.stamp_ret)
+            except Nondeterministic as e:
+                errs.append(f"{where}: {e}")
+                break
+            elig_run = elig_run + 1 if w is not None else 0
+            if elig_run >= MISSING_TAKE_BOUNDARIES:
+                errs.append(f"{where}: interrupt {w[0]} (level {w[1]:02x}) eligible at {elig_run} retirement boundaries up to cycle {m.stamp_ret} and not taken")
+                elig_run = -1000000
         else:
             errs.append(f"{where}: unknown event {f[0]}")
         if len(errs) >= 10:
@@ -1058,7 +1109,7 @@ def main():
             break
     else:
         sys.exit(f"{prefix}: no tohost store within {max_steps} instructions")
-    lines = ["%08x %08x %02d %08x %08x %x %x %08x %08x %d %03x %08x %08x" % t[:13] for t in trace]
+    lines = ["%08x %08x %02d %08x %08x %x %x %08x %08x %d %03x %08x %08x %x %08x %08x %08x %08x" % t for t in trace]
     Path(prefix + ".trace.ref").write_bytes(("\n".join(lines) + "\n").encode())
     tl = [str(len(traps))] + ["%d %08x %08x" % t for t in traps]
     Path(prefix + ".traps.ref").write_bytes(("\n".join(tl) + "\n").encode())

@@ -51,14 +51,27 @@
 //     request while reset is asserted
 //   - no X on control outputs; the trace never shows x0 written with a nonzero value
 //
-// Interrupt test input (step 2.2b, DECISIONS.md D-033)
-//   A retired word store to IRQTRIG (0x2000_FFD0) arms a model of the interrupt
-//   controller's two flops: after [15:0] cycles (plus a seeded random 0-15 if bit 31 is
-//   set) the pending flop is set (cycle 0), the request irq_req_i follows one edge later,
-//   and both stay set until the core acknowledges a take (irq_ack_o). [21:16] is the id,
-//   [27:24] the expected latency in ideal mode (0: not checked). One trigger at a time.
+// Interrupt controller (step 2.2d, DECISIONS.md D-035; step 2.2b's flop model is gone)
+//   px_clic (64 inputs, 4 level bits) sits on the data port: addresses 0xE000_0000 to
+//   0xE000_FFFF go to it with the 16-bit offset, granted in the request cycle and answered
+//   in the next cycle in every memory mode (a one-cycle slave; the random grants and
+//   latencies of the stress modes apply to the memories). Its winner drives the core's
+//   request port, the core's ack/claim and mil/mintthresh/mode drive it back. Inputs 0
+//   (machine software interrupt, pending set by a store) and 1 (timer, Phase 4) are tied 0;
+//   inputs 2-63 come from the harness words:
+//   - IRQTRIG (0x2000_FFD0), a retired word store: after [15:0] cycles (plus a seeded random
+//     0-15 if bit 31 is set) input [21:16] is driven so that px_clic's pending flop for it is
+//     set at that edge (cycle 0): a one-cycle pulse, or with bit 30 a level held until the
+//     program stores the id to IRQCLR (0x2000_FFD4). [27:24] is the expected latency in
+//     ideal mode (0: not checked), measured when that id is taken.
+//   - AGENT (0x2000_FFD8): a seeded agent on ids [5:0] .. [5:0] + [11:6] - 1 (2-63 only), an
+//     event every 2^[15:12] cycles on average; bit 16 = level mode (raise an input and hold
+//     it until IRQCLR), else one-cycle pulses; bit 31 enables, 0 stops it.
 //   Monitors, every run:
-//   - a take only while irq_req_i is high and mstatus.MIE is 1; no CSR commit, MRET, data
+//   - a take only while irq_req_i is high and mstatus.MIE is 1 (O2), acknowledging exactly
+//     the presented id (O3); a claim only for a committed mnxti write while the presented
+//     winner is valid, not vectored, above mpil and mintthresh, in CLIC mode, for its id
+//     (O3); no CSR commit, MRET, data
 //     request, multiplier stage-1 load or divide completion in the take cycle
 //   - latency (pending flop to the handler's first instruction in EX): exactly the declared
 //     value in ideal mode, at least 4 in every mode; every cycle in which the request is
@@ -73,7 +86,11 @@
 //   the bench writes every retirement, exception and interrupt of each run in program order
 //   to sim/logs/replay_<NAME>_<run>.ev and lists the runs in sim/logs/replay_<NAME>.manifest;
 //   the source list's post_check (scripts/px_iss.py --replay) re-executes them with the
-//   recorded interrupts. Their trap table lists exceptions only.
+//   recorded interrupts. Their trap table lists exceptions only. Since step 2.2d each
+//   retirement also carries its CSR side writes, the cycle it left EX (its data grant or
+//   CSR commit) and the cycle it retired; interrupts carry their take cycle; every change
+//   of the CLIC inputs is a line "X <cycle> <inputs>" (cycles: the bench's edge count at
+//   which the event is sampled), so px_iss can model the CLIC independently.
 //
 // Run: scripts/run_unit.sh tb_core tb/core/tb_core.f   (+only=<program>, +vcd)
 
@@ -95,6 +112,8 @@ module tb_core #(
   localparam logic [31:0] CYCCHK    = 32'h2000_FFE8;
   localparam logic [31:0] TRAPTAB   = 32'h2000_F000;
   localparam logic [31:0] IRQTRIG   = 32'h2000_FFD0;
+  localparam logic [31:0] IRQCLR    = 32'h2000_FFD4;
+  localparam logic [31:0] AGENT     = 32'h2000_FFD8;
   localparam logic [31:0] TRAPVEC   = 32'h1000_0040;
   localparam int          MAX_CYCLES = 400000;
   localparam int          QDEPTH    = 8;
@@ -126,27 +145,58 @@ module tb_core #(
   logic [4:0]  r_rd;
   logic [3:0]  r_rmask, r_wmask;
   logic        t_valid, t_irq;
-  logic [4:0]  t_cause;
+  logic [5:0]  t_cause;
   logic [31:0] t_pc, t_tval;
-  logic        irq_req, irq_ack;
-  logic [5:0]  irq_id, irq_ack_id;
+  logic [3:0]  r_csrx_we;
+  logic [127:0] r_csrx_wdata;
+  logic        irq_req, irq_ack, irq_valid, irq_shv, claim, cmode;
+  logic [5:0]  irq_id, irq_ack_id, claim_id;
+  logic [7:0]  irq_level, mil, mthresh;
+  // data port as the core sees it: memories (bench model) or the CLIC
+  logic        dc_gnt, dc_rvalid, dc_err;
+  logic [31:0] dc_rdata;
+  logic        c_sel, c_gnt, c_rvalid, c_err;
+  logic [31:0] c_rdata;
+  logic [63:0] clic_in;
 
   px_core #(.BOOT_ADDR(ITCM_BASE), .MTVEC_RESET(TRAPVEC)) dut (
     .clk_i(clk), .rst_ni(rst_n),
     .instr_req_o(i_req), .instr_gnt_i(i_gnt), .instr_addr_o(i_addr),
     .instr_rvalid_i(i_rvalid), .instr_rdata_i(i_rdata), .instr_err_i(i_err),
-    .data_req_o(d_req), .data_gnt_i(d_gnt), .data_addr_o(d_addr), .data_we_o(d_we),
-    .data_be_o(d_be), .data_wdata_o(d_wdata), .data_rvalid_i(d_rvalid),
-    .data_rdata_i(d_rdata), .data_err_i(d_err),
-    .irq_req_i(irq_req), .irq_id_i(irq_id), .irq_ack_o(irq_ack), .irq_ack_id_o(irq_ack_id),
+    .data_req_o(d_req), .data_gnt_i(dc_gnt), .data_addr_o(d_addr), .data_we_o(d_we),
+    .data_be_o(d_be), .data_wdata_o(d_wdata), .data_rvalid_i(dc_rvalid),
+    .data_rdata_i(dc_rdata), .data_err_i(dc_err),
+    .irq_req_i(irq_req), .irq_valid_i(irq_valid), .irq_id_i(irq_id), .irq_level_i(irq_level),
+    .irq_shv_i(irq_shv), .irq_ack_o(irq_ack), .irq_ack_id_o(irq_ack_id),
+    .irq_claim_o(claim), .irq_claim_id_o(claim_id),
+    .mil_o(mil), .mintthresh_o(mthresh), .clic_mode_o(cmode),
     .trap_irq_o(t_irq),
     .rvfi_valid_o(r_valid), .rvfi_pc_o(r_pc), .rvfi_insn_o(r_insn),
     .rvfi_rd_addr_o(r_rd), .rvfi_rd_wdata_o(r_rd_wdata), .rvfi_mem_addr_o(r_mem_addr),
     .rvfi_mem_rmask_o(r_rmask), .rvfi_mem_wmask_o(r_wmask),
     .rvfi_mem_rdata_o(r_mem_rdata), .rvfi_mem_wdata_o(r_mem_wdata),
     .rvfi_csr_we_o(r_csr_we), .rvfi_csr_addr_o(r_csr_addr), .rvfi_csr_wdata_o(r_csr_wdata),
+    .rvfi_csrx_we_o(r_csrx_we), .rvfi_csrx_wdata_o(r_csrx_wdata),
     .trap_valid_o(t_valid), .trap_cause_o(t_cause), .trap_pc_o(t_pc), .trap_tval_o(t_tval)
   );
+
+  // CLIC on the data port (D-035 item 21): granted in the request cycle, one-cycle response
+  localparam logic [15:0] CLIC_HI = 16'hE000;
+  assign c_sel = d_addr[31:16] == CLIC_HI;
+  px_clic #(.NUM_IRQ(64), .LVL_BITS(4)) u_clic (
+    .clk_i(clk), .rst_ni(rst_n),
+    .irq_i(clic_in),
+    .req_i(d_req && c_sel), .gnt_o(c_gnt), .addr_i(d_addr[15:0]), .we_i(d_we), .be_i(d_be),
+    .wdata_i(d_wdata), .rvalid_o(c_rvalid), .rdata_o(c_rdata), .err_o(c_err),
+    .mil_i(mil), .mintthresh_i(mthresh), .clic_mode_i(cmode),
+    .ack_i(irq_ack), .ack_id_i(irq_ack_id), .claim_i(claim), .claim_id_i(claim_id),
+    .irq_req_o(irq_req), .irq_valid_o(irq_valid), .irq_id_o(irq_id), .irq_level_o(irq_level),
+    .irq_shv_o(irq_shv)
+  );
+  assign dc_gnt    = c_sel ? c_gnt : d_gnt;
+  assign dc_rvalid = d_rvalid || c_rvalid;
+  assign dc_rdata  = c_rvalid ? c_rdata : d_rdata;
+  assign dc_err    = c_rvalid ? c_err : d_err;
 
   // ---------------------------------------------------------------------------
   // Memory access helpers
@@ -208,14 +258,21 @@ module tb_core #(
   int          ref_traps;          // trap count in the reference list (-1: unknown)
   int          last_retire;
 
-  // Interrupt test input and replay (D-033)
+  // Interrupt harness and replay (D-033, D-035)
   bit          replay;             // this program is checked by px_iss --replay
   int          ev_fd, man_fd, replay_runs;
-  bit          irq_armed, irq_pend;
-  int          irq_cnt;            // cycles until the pending flop is set
-  int          irq_t0;             // edge at which the pending flop was set
+  bit          irq_armed, irq_trig_level;
+  bit          irq_meas;           // a declared-latency trigger fired and was not taken yet
+  int          irq_cnt;            // cycles until the trigger fires
+  int          irq_t0;             // edge at which the pending flop of the trigger is set
   int          irq_lat_exp;        // declared latency (ideal mode), 0 = not checked
   logic [5:0]  irq_trig_id;
+  logic [63:0] h_pulse, h_level, a_pulse, a_level;   // harness and agent inputs
+  bit          agent_on, agent_lvl;
+  int          agent_base, agent_n, agent_rate;
+  logic [63:0] x_last;             // last logged input vector
+  int          exq [$];            // cycles in which the instructions now in WB left EX
+  int          n_claims, total_claims;
   bit          irq_wait_ex;        // a take happened, waiting for the handler in EX
   logic [31:0] irq_target;
   int          n_irqs, total_irqs, lat_checked, lat_min, lat_max;
@@ -301,10 +358,12 @@ module tb_core #(
       // nothing is outstanding or the outstanding response arrives in the same cycle.
       if (i_req && i_gnt && (ic - (i_rvalid ? 1 : 0)) != 0)
         run_error($sformatf("instruction port: grant with %0d request(s) outstanding", ic - (i_rvalid ? 1 : 0)));
-      if (d_req && d_gnt && (dc - (d_rvalid ? 1 : 0)) != 0)
-        run_error($sformatf("data port: grant with %0d request(s) outstanding", dc - (d_rvalid ? 1 : 0)));
+      // (a CLIC request is answered in the next cycle: c_rvalid marks it outstanding)
+      if (d_req && dc_gnt && (dc + (c_rvalid ? 1 : 0) - (dc_rvalid ? 1 : 0)) != 0)
+        run_error($sformatf("data port: grant with %0d request(s) outstanding", dc + (c_rvalid ? 1 : 0) - (dc_rvalid ? 1 : 0)));
+      if (c_rvalid && d_rvalid) run_error("CLIC and memory responses in the same cycle");
       i_pend <= i_req && !i_gnt;  i_pend_addr <= i_addr;
-      d_pend <= d_req && !d_gnt;  d_pend_addr <= d_addr;
+      d_pend <= d_req && !dc_gnt; d_pend_addr <= d_addr;
       d_pend_we <= d_we; d_pend_be <= d_be; d_pend_wdata <= d_wdata;
 
       // ---- responses consumed this cycle ----
@@ -322,7 +381,7 @@ module tb_core #(
         iq_due[(ih + ic) % QDEPTH] = due; ic++; ild = due;
         if (ic > QDEPTH) run_error("instruction queue overflow");
       end
-      if (d_req && d_gnt) begin
+      if (d_req && d_gnt && !c_sel) begin
         a   = d_addr;
         err = !(in_itcm(a) || in_dtcm(a) || is_dev(a));
         word = 32'h0;
@@ -383,39 +442,62 @@ module tb_core #(
     if (!rst_n && (i_req || d_req)) run_error("request while reset is asserted");
 
   // ---------------------------------------------------------------------------
-  // Interrupt test input (D-033): a model of the interrupt controller's pending flop and
-  // registered request, armed by a retired word store to IRQTRIG. `cycle` (old value) is
-  // the number of the current edge.
+  // Interrupt harness (D-033, D-035): drives the CLIC inputs. A trigger "fires" at the edge
+  // that drives its input, so px_clic's pending flop for it is set at the next edge (cycle 0
+  // of the latency). `cycle` (old value) is the number of the current edge.
   // ---------------------------------------------------------------------------
+  assign clic_in = (h_pulse | h_level | a_pulse | a_level) & ~64'h3;   // inputs 0 and 1 tied 0
+
+  task automatic trig_fire();
+    if (irq_trig_level) h_level[irq_trig_id] <= 1'b1;
+    else                h_pulse[irq_trig_id] <= 1'b1;
+    irq_t0   = cycle + 1;
+    irq_meas = 1'b1;
+  endtask
+
   always @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
-      irq_pend  <= 1'b0;
-      irq_req   <= 1'b0;
-      irq_id    <= 6'd0;
-      irq_armed = 1'b0;
+      h_pulse <= '0; h_level <= '0; a_pulse <= '0; a_level <= '0;
+      irq_armed = 1'b0; irq_meas = 1'b0; agent_on = 1'b0;
     end else begin
-      if (irq_ack) begin
-        irq_pend <= 1'b0;
-        irq_req  <= 1'b0;
-      end else begin
-        irq_req <= irq_pend;
-        if (irq_armed) begin
-          if (irq_cnt == 0) begin
-            irq_pend  <= 1'b1;
-            irq_armed = 1'b0;
-            irq_t0    = cycle;
-          end else
-            irq_cnt = irq_cnt - 1;
+      h_pulse <= '0;                               // pulses last one cycle
+      a_pulse <= '0;
+      if (irq_armed) begin
+        if (irq_cnt == 0) begin trig_fire(); irq_armed = 1'b0; end
+        else irq_cnt = irq_cnt - 1;
+      end
+      if (r_valid && r_wmask == 4'b1111 && !tohost_retired) begin
+        if (r_mem_addr == IRQTRIG) begin
+          if (irq_armed || (irq_meas && irq_lat_exp != 0))
+            run_error("interrupt trigger while a previous trigger with a declared latency is pending");
+          irq_cnt        = int'(r_mem_wdata[15:0]) + (r_mem_wdata[31] ? int'($urandom(seed) % 16) : 0);
+          irq_trig_id    = r_mem_wdata[21:16];
+          irq_trig_level = r_mem_wdata[30];
+          irq_lat_exp    = int'(r_mem_wdata[27:24]);
+          if (irq_trig_id < 6'd2) run_error("interrupt trigger on a tied input (id 0 or 1)");
+          if (irq_cnt == 0) trig_fire();
+          else begin irq_cnt = irq_cnt - 1; irq_armed = 1'b1; end
+        end
+        if (r_mem_addr == IRQCLR) begin
+          h_level[r_mem_wdata[5:0]] <= 1'b0;
+          a_level[r_mem_wdata[5:0]] <= 1'b0;
+        end
+        if (r_mem_addr == AGENT) begin
+          agent_on   = r_mem_wdata[31];
+          agent_lvl  = r_mem_wdata[16];
+          agent_base = int'(r_mem_wdata[5:0]);
+          agent_n    = int'(r_mem_wdata[11:6]);
+          agent_rate = int'(r_mem_wdata[15:12]);
+          if (agent_on && (agent_base < 2 || agent_n == 0 || agent_base + agent_n > 64))
+            run_error("agent id range outside inputs 2-63");
         end
       end
-      if (r_valid && r_wmask == 4'b1111 && r_mem_addr == IRQTRIG && !tohost_retired) begin
-        if (irq_armed || irq_pend || irq_req)
-          run_error("interrupt trigger while the previous one is still pending");
-        irq_armed   = 1'b1;
-        irq_cnt     = int'(r_mem_wdata[15:0]) + (r_mem_wdata[31] ? int'($urandom(seed) % 16) : 0);
-        irq_id      <= r_mem_wdata[21:16];
-        irq_trig_id = r_mem_wdata[21:16];
-        irq_lat_exp = int'(r_mem_wdata[27:24]);
+      // seeded agent: an event every 2^rate cycles on average on a random id of its range
+      if (agent_on && agent_n != 0 && ($urandom(seed) % (1 << agent_rate)) == 0) begin
+        int id;
+        id = agent_base + int'($urandom(seed) % agent_n);
+        if (agent_lvl) a_level[id] <= 1'b1;
+        else           a_pulse[id] <= 1'b1;
       end
     end
   end
@@ -429,10 +511,12 @@ module tb_core #(
     int          e_rd, e_cw, n;
     logic [3:0]  e_rm, e_wm;
     logic [31:0] got_md, lm;
+    logic [3:0]  e_sx;
+    logic [31:0] e_s0, e_s1, e_s2, e_s3;
     if (ref_fd != 0) begin
-      n = $fscanf(ref_fd, "%h %h %d %h %h %h %h %h %h %d %h %h %h\n", e_pc, e_insn, e_rd, e_wd, e_ma,
-                  e_rm, e_wm, e_md, e_care, e_cw, e_ca, e_cd, e_ccare);
-      if (n != 13)
+      n = $fscanf(ref_fd, "%h %h %d %h %h %h %h %h %h %d %h %h %h %h %h %h %h %h\n", e_pc, e_insn, e_rd, e_wd, e_ma,
+                  e_rm, e_wm, e_md, e_care, e_cw, e_ca, e_cd, e_ccare, e_sx, e_s0, e_s1, e_s2, e_s3);
+      if (n != 18)
         run_error($sformatf("retired pc %08h beyond the end of the reference trace", r_pc));
       else begin
         ref_checked++;
@@ -450,6 +534,11 @@ module tb_core #(
                  (e_cw != 0 && (r_csr_addr !== e_ca || (r_csr_wdata & e_ccare) !== (e_cd & e_ccare))))
           run_error($sformatf("retirement %0d (pc %08h) CSR write differs from reference: we %0d csr %03h = %08h; expected we %0d csr %03h = %08h",
                               ref_checked, r_pc, r_csr_we, r_csr_addr, r_csr_wdata, e_cw, e_ca, e_cd));
+        else if (r_csrx_we !== e_sx || (e_sx[0] && r_csrx_wdata[31:0] !== e_s0) ||
+                 (e_sx[1] && r_csrx_wdata[63:32] !== e_s1) || (e_sx[2] && r_csrx_wdata[95:64] !== e_s2) ||
+                 (e_sx[3] && r_csrx_wdata[127:96] !== e_s3))
+          run_error($sformatf("retirement %0d (pc %08h) CSR side writes %b %h differ from reference %b %08h %08h %08h %08h",
+                              ref_checked, r_pc, r_csrx_we, r_csrx_wdata, e_sx, e_s0, e_s1, e_s2, e_s3));
       end
     end
   endtask
@@ -468,9 +557,11 @@ module tb_core #(
         if (!tohost_retired) begin
           retired++;
           if (replay && ev_fd != 0)
-            $fwrite(ev_fd, "R %08h %08h %0d %08h %08h %h %h %08h %0d %03h %08h\n", r_pc, r_insn, r_rd,
-                    r_rd_wdata, r_mem_addr, r_rmask, r_wmask,
-                    (r_rmask != 4'd0) ? r_mem_rdata : r_mem_wdata, r_csr_we, r_csr_addr, r_csr_wdata);
+            $fwrite(ev_fd, "R %08h %08h %0d %08h %08h %h %h %08h %0d %03h %08h %h %08h %08h %08h %08h %0d %0d\n",
+                    r_pc, r_insn, r_rd, r_rd_wdata, r_mem_addr, r_rmask, r_wmask,
+                    (r_rmask != 4'd0) ? r_mem_rdata : r_mem_wdata, r_csr_we, r_csr_addr, r_csr_wdata,
+                    r_csrx_we, r_csrx_wdata[31:0], r_csrx_wdata[63:32], r_csrx_wdata[95:64],
+                    r_csrx_wdata[127:96], (exq.size() != 0) ? exq[0] : -1, cycle);
           else
             check_ref();
         end
@@ -524,13 +615,23 @@ module tb_core #(
         if (replay && ev_fd != 0) $fwrite(ev_fd, "T %0d %08h %08h\n", t_cause, t_pc, t_tval);
       end
 
-      // ---- interrupt take point (D-033) ----
+      // ---- interrupt take point (D-033) and CLIC interface rules (D-034 O2, O3) ----
       if (t_irq !== irq_ack) run_error("trap_irq_o and irq_ack_o differ");
+      if (claim) begin
+        // a claim only for a committed mnxti write that found the presented winner, its id
+        if (!(dut.csr_commit && dut.ex_csr_addr == 12'h345 && dut.ex_dec_q.csr_write) || !irq_valid ||
+            irq_shv || !cmode || claim_id !== irq_id || irq_level <= dut.u_csr.u_clic.mpil_q ||
+            irq_level <= mthresh)
+          run_error($sformatf("claim of id %0d without a committed mnxti write and an eligible presented winner (valid %b id %0d level %02h shv %b)",
+                              claim_id, irq_valid, irq_id, irq_level, irq_shv));
+        if (irq_ack) run_error("claim and take in the same cycle");
+        if (!tohost_retired) n_claims++;
+      end
       if (irq_ack) begin
         if (!irq_req || !dut.csr_mie)
           run_error("interrupt taken without an eligible request");
         if (irq_ack_id !== irq_id) run_error("acknowledged id differs from the request");
-        if (!t_valid || t_cause !== irq_id[4:0] || t_tval !== 32'd0)
+        if (!t_valid || t_cause !== irq_id || t_tval !== 32'd0)
           run_error($sformatf("take reported as valid %b cause %0d tval %08h", t_valid, t_cause, t_tval));
         if (dut.csr_commit || dut.mret_commit || d_req || dut.u_mul.en_i ||
             dut.div_accept)
@@ -559,10 +660,14 @@ module tb_core #(
         if (mode == MODE_IDEAL) irq_ideal_seen = 1'b1;
         if (!tohost_retired) begin
           n_irqs++;
-          if (replay && ev_fd != 0) $fwrite(ev_fd, "I %0d %08h\n", irq_id, t_pc);
+          if (replay && ev_fd != 0) $fwrite(ev_fd, "I %0d %08h %0d\n", irq_id, t_pc, cycle);
         end
-        irq_wait_ex = 1'b1;
-        irq_target  = dut.csr_mtvec;
+        // latency is measured for the trigger's own id; the handler is at NBASE
+        if (irq_meas && irq_ack_id == irq_trig_id) begin
+          irq_wait_ex = 1'b1;
+          irq_meas    = 1'b0;
+          irq_target  = dut.csr_mtvec;
+        end
       end else if (irq_req && dut.csr_mie) begin
         // eligible but deferred: count each cause (coverage), any other reason is an error
         if (dut.wb_bus_err)                    cov_defer[0]++;
@@ -591,6 +696,31 @@ module tb_core #(
         if (lat < run_lat_min) run_lat_min = lat;
         if (lat > run_lat_max) run_lat_max = lat;
         if (mode == MODE_IDEAL && irq_lat_exp != 0 && lat == irq_lat_exp) run_lat_exact++;
+      end
+      // EX-leave stamps for the replay log (after the retirement above has used exq[0])
+      if ((r_valid || dut.wb_bus_err) && exq.size() != 0) begin
+        int dmy;
+        dmy = exq.pop_front();
+      end
+      if (dut.ex_to_wb) exq.push_back(cycle);
+      if (exq.size() > 2) run_error("more than two instructions between EX and retirement");
+    end
+  end
+
+  // ---------------------------------------------------------------------------
+  // Replay stamps (D-035 item 22): the cycle in which each instruction left EX (pushed when
+  // it moves to WB, popped when it retires or traps in WB), and every change of the CLIC
+  // inputs. A take, an EX trap or a WB bus error never leaves an entry behind: only
+  // instructions that reach WB are pushed, and each of them leaves WB once.
+  // ---------------------------------------------------------------------------
+  always @(posedge clk) begin
+    if (!rst_n) begin
+      exq.delete();
+      x_last = '0;
+    end else begin
+      if (clic_in !== x_last) begin
+        if (replay && ev_fd != 0 && !tohost_retired) $fwrite(ev_fd, "X %0d %016h\n", cycle, clic_in);
+        x_last = clic_in;
       end
     end
   end
@@ -644,7 +774,7 @@ module tb_core #(
           xo_pop();
         end
       end
-      if (d_req && d_gnt) begin
+      if (d_req && dc_gnt) begin
         if (xo_n == XO_DEPTH) run_error("more than 4 data accesses in flight");
         else begin
           xo_addr[xo_n] = d_addr; xo_be[xo_n] = d_be; xo_we[xo_n] = d_we;
@@ -698,7 +828,7 @@ module tb_core #(
       if (ref_fd == 0) run_error({"missing reference trace for ", name});
     end
     ref_checked = 0;
-    n_irqs = 0; irq_wait_ex = 1'b0;
+    n_irqs = 0; irq_wait_ex = 1'b0; n_claims = 0;
     run_lat_n = 0; run_lat_min = 1 << 30; run_lat_max = 0; run_lat_exact = 0;
     begin
       int tfd;
@@ -782,6 +912,7 @@ module tb_core #(
       replay_runs++;
     end
     total_irqs += n_irqs;
+    total_claims += n_claims;
     if (irq_wait_ex) run_error("an interrupt was taken but its handler never reached EX");
 
     // reference trace fully consumed (it ends with the tohost store)
@@ -825,9 +956,9 @@ module tb_core #(
 
     runs++;
     total_errors += errors_run;
-    $display("%-6s %-22s %-6s seed %08h  %0d retired, %0d cycles, %0d traps, %0d interrupts, %0d timing marks, %0d cycle checks",
+    $display("%-6s %-22s %-6s seed %08h  %0d retired, %0d cycles, %0d traps, %0d interrupts, %0d claims, %0d timing marks, %0d cycle checks",
              errors_run == 0 ? "ok" : "FAILED", name, mname, seed_i, retired, cycle, n_traps,
-             n_irqs, marks_checked, cyc_checked);
+             n_irqs, n_claims, marks_checked, cyc_checked);
     if (run_lat_n != 0)
       $display("       interrupt latency %0d-%0d cycles over %0d takes; %0d exactly as declared (ideal mode)",
                run_lat_min, run_lat_max, run_lat_n, run_lat_exact);
@@ -850,7 +981,7 @@ module tb_core #(
     end
     rst_n = 1'b0;
     trace_fd = 0; ref_fd = 0; ev_fd = 0;
-    replay_runs = 0; total_irqs = 0; lat_checked = 0; lat_min = 1 << 30; lat_max = 0;
+    replay_runs = 0; total_irqs = 0; total_claims = 0; lat_checked = 0; lat_min = 1 << 30; lat_max = 0;
     irq_ideal_seen = 1'b0;
     for (int k = 0; k < COV_EX; k++) cov_ex[k] = 0;
     for (int k = 1; k <= 17; k++) cov_div[k] = 0;
@@ -908,8 +1039,8 @@ module tb_core #(
       if (total_irqs == 0)
         $display("PASS %s (%0d program runs, %0d retirements matched the reference model, %0d data accesses checked exactly once)", NAME, runs, total_ref, xo_checked);
       else
-        $display("PASS %s (%0d program runs, %0d retirements matched the reference model, %0d data accesses checked exactly once; %0d interrupts taken, %0d latencies %0d-%0d cycles, take coverage %0d+17+4 bins; %0d runs for replay)",
-                 NAME, runs, total_ref, xo_checked, total_irqs, lat_checked, lat_min, lat_max,
+        $display("PASS %s (%0d program runs, %0d retirements matched the reference model, %0d data accesses checked exactly once; %0d interrupts taken, %0d mnxti claims, %0d trigger latencies %0d-%0d cycles, take coverage %0d+17+4 bins; %0d runs for replay)",
+                 NAME, runs, total_ref, xo_checked, total_irqs, total_claims, lat_checked, lat_min, lat_max,
                  COV_EX, replay_runs);
     end else begin
       $display("FAIL %s (%0d errors over %0d runs)", NAME, total_errors, runs);

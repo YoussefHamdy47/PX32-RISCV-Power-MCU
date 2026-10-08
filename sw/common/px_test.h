@@ -40,7 +40,24 @@
 #define TF_IRQS    36             /* interrupts taken (PX_IRQ_RESUME programs) */
 #define TF_IRQ_ID  40             /* mcause of the last interrupt */
 #define TF_IRQ_RESUME 44          /* one-use interrupt return address (0: mepc) */
-#define IRQTRIG    0x2000FFD0     /* testbench interrupt trigger (tb_core, D-033) */
+#define IRQTRIG    0x2000FFD0     /* testbench interrupt trigger (tb_core, D-033, D-035) */
+#define IRQCLR     0x2000FFD4     /* testbench: drop a held level input (store its id) */
+#define AGENT      0x2000FFD8     /* testbench: seeded interrupt agent (tb_core header) */
+
+/* CLIC (step 2.2d, D-035): memory-mapped registers and CSR numbers of the pinned draft */
+#define CLIC_BASE   0xE0000000
+#define CLIC_INTIP  0xE0001000    /* entry i at CLIC_INTIP + 4i: ip, ie, attr, ctl bytes */
+#define CLIC_ENTRY(i) (CLIC_INTIP + 4 * (i))
+#define CLIC_ATTR_SHV   0x01
+#define CLIC_ATTR_EDGE  0x02
+#define CLIC_ATTR_NEG   0x04
+/* word for clicintip/ie/attr/ctl at once: level l (0-15 -> CLIC level l*16+15), attr, ie */
+#define CLIC_WORD(l, attr, ie) ((((l) << 4 | 0xF) << 24) | ((attr) << 16) | ((ie) << 8))
+#define CSR_MTVT        0x307
+#define CSR_MNXTI       0x345
+#define CSR_MINTTHRESH  0x347
+#define CSR_MSCRATCHCSWL 0x349
+#define CSR_MINTSTATUS  0xFB1
 
 #define CAUSE_IACCESS 1
 #define CAUSE_ILLEGAL 2

@@ -18,7 +18,11 @@
 //     in every cycle, so every check runs with interrupt takes possible (the handler's first
 //     instruction carries rvfi_intr). No assumption: a take clears MIE, so takes cannot
 //     follow each other without a retirement in between, and liveness needs no fairness
-//     assumption for them.
+//     assumption for them. Since step 2.2d (D-035) the rest of the CLIC winner (irq_valid_i,
+//     irq_level_i, irq_shv_i) is free as well, so CLIC-mode entries, mnxti and vectored
+//     entries happen with arbitrary winners.
+//   - mscratchcswl (step 2.2d) writes mscratch as a side effect: reported to the mscratch
+//     checks from the core's side-write slot 1 (old value = the instruction's rd value).
 
 module rvfi_wrapper (
   input  clock,
@@ -31,6 +35,8 @@ module rvfi_wrapper (
   (* keep *) `rvformal_rand_reg [31:0] d_rdata;
   (* keep *) `rvformal_rand_reg        irq;
   (* keep *) `rvformal_rand_reg [5:0]  irq_id;
+  (* keep *) `rvformal_rand_reg        irq_valid, irq_shv;
+  (* keep *) `rvformal_rand_reg [7:0]  irq_level;
 
   (* keep *) wire        i_req;
   (* keep *) wire [31:0] i_addr;
@@ -44,11 +50,15 @@ module rvfi_wrapper (
   (* keep *) wire [31:0] c_rdata, c_wdata;
 
   // Product trace and trap ports are not used by riscv-formal.
-  wire        u_valid, u_csr_we, u_tvalid, u_tirq, u_ack;
-  wire [5:0]  u_ack_id;
+  wire        u_valid, u_csr_we, u_tvalid, u_tirq, u_ack, u_claim, u_cmode;
+  wire [5:0]  u_ack_id, u_claim_id;
+  wire [7:0]  u_mil, u_th;
   wire [31:0] u_pc, u_insn, u_rd_wdata, u_mem_addr, u_mem_rdata, u_mem_wdata, u_csr_wdata;
   wire [31:0] u_tpc, u_ttval;
-  wire [4:0]  u_rd, u_tcause;
+  wire [4:0]  u_rd;
+  wire [5:0]  u_tcause;
+  (* keep *) wire [3:0]   x_we;
+  (* keep *) wire [127:0] x_wdata;
   wire [3:0]  u_rmask, u_wmask;
   wire [11:0] u_csr_addr;
 
@@ -61,12 +71,16 @@ module rvfi_wrapper (
     .data_req_o(d_req), .data_gnt_i(d_gnt), .data_addr_o(d_addr), .data_we_o(d_we),
     .data_be_o(d_be), .data_wdata_o(d_wdata), .data_rvalid_i(d_rvalid),
     .data_rdata_i(d_rdata), .data_err_i(1'b0),
-    .irq_req_i(irq), .irq_id_i(irq_id), .irq_ack_o(u_ack), .irq_ack_id_o(u_ack_id),
+    .irq_req_i(irq), .irq_valid_i(irq_valid), .irq_id_i(irq_id), .irq_level_i(irq_level),
+    .irq_shv_i(irq_shv), .irq_ack_o(u_ack), .irq_ack_id_o(u_ack_id),
+    .irq_claim_o(u_claim), .irq_claim_id_o(u_claim_id), .mil_o(u_mil), .mintthresh_o(u_th),
+    .clic_mode_o(u_cmode),
     .rvfi_valid_o(u_valid), .rvfi_pc_o(u_pc), .rvfi_insn_o(u_insn),
     .rvfi_rd_addr_o(u_rd), .rvfi_rd_wdata_o(u_rd_wdata), .rvfi_mem_addr_o(u_mem_addr),
     .rvfi_mem_rmask_o(u_rmask), .rvfi_mem_wmask_o(u_wmask),
     .rvfi_mem_rdata_o(u_mem_rdata), .rvfi_mem_wdata_o(u_mem_wdata),
     .rvfi_csr_we_o(u_csr_we), .rvfi_csr_addr_o(u_csr_addr), .rvfi_csr_wdata_o(u_csr_wdata),
+    .rvfi_csrx_we_o(x_we), .rvfi_csrx_wdata_o(x_wdata),
     .trap_valid_o(u_tvalid), .trap_irq_o(u_tirq), .trap_cause_o(u_tcause), .trap_pc_o(u_tpc), .trap_tval_o(u_ttval),
     .rvf_valid_o(rvfi_valid), .rvf_order_o(rvfi_order), .rvf_insn_o(rvfi_insn),
     .rvf_trap_o(rvfi_trap), .rvf_halt_o(rvfi_halt), .rvf_intr_o(rvfi_intr),
@@ -89,10 +103,13 @@ module rvfi_wrapper (
   wire c_lo_minstret = c_valid && c_addr == 12'hB02, c_hi_minstret = c_valid && c_addr == 12'hB82;
 
 `ifdef RISCV_FORMAL_CSR_MSCRATCH
-  assign rvfi_csr_mscratch_rmask = (c_valid && c_addr == 12'h340 && c_read)  ? 32'hFFFF_FFFF : 32'd0;
-  assign rvfi_csr_mscratch_wmask = (c_valid && c_addr == 12'h340 && c_write) ? 32'hFFFF_FFFF : 32'd0;
-  assign rvfi_csr_mscratch_rdata = (c_valid && c_addr == 12'h340) ? c_rdata : 32'd0;
-  assign rvfi_csr_mscratch_wdata = (c_valid && c_addr == 12'h340) ? c_wdata : 32'd0;
+  // mscratch directly, or swapped by mscratchcswl (side-write slot 1: the old value is the
+  // instruction's rd value, the new one rs1)
+  wire c_swl = c_valid && c_addr == 12'h349 && x_we[1];
+  assign rvfi_csr_mscratch_rmask = ((c_valid && c_addr == 12'h340 && c_read) || c_swl)  ? 32'hFFFF_FFFF : 32'd0;
+  assign rvfi_csr_mscratch_wmask = ((c_valid && c_addr == 12'h340 && c_write) || c_swl) ? 32'hFFFF_FFFF : 32'd0;
+  assign rvfi_csr_mscratch_rdata = (c_valid && (c_addr == 12'h340 || c_swl)) ? c_rdata : 32'd0;
+  assign rvfi_csr_mscratch_wdata = (c_valid && c_addr == 12'h340) ? c_wdata : c_swl ? x_wdata[63:32] : 32'd0;
 `endif
 `ifdef RISCV_FORMAL_CSR_MTVAL
   assign rvfi_csr_mtval_rmask = (c_valid && c_addr == 12'h343 && c_read)  ? 32'hFFFF_FFFF : 32'd0;

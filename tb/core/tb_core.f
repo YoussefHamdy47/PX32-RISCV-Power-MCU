@@ -12,4 +12,5 @@ rtl/core/px_csr.sv
 rtl/core/px_mul.sv
 rtl/core/px_div.sv
 rtl/core/px_core.sv
+rtl/irq/px_clic.sv
 tb/core/tb_core.sv

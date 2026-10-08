@@ -23,10 +23,13 @@
 //           +stress=<seed>          random grant delays and 1-3 cycle latency (default: ideal)
 //           +trace=<file>           trace for step 1.9, in program order, one line per event:
 //                                   retirement: pc insn rd value csr_we csr_addr csr_value
-//                                     mem_addr rmask wmask wdata
+//                                     mem_addr rmask wmask wdata [addr value ...]
 //                                     (hex; csr_value is the CSR after the write; mem_addr is
 //                                     the byte address, the masks are byte lanes of the
-//                                     word, wdata the store data on its lanes)
+//                                     word, wdata the store data on its lanes; one "addr
+//                                     value" pair per other CSR the instruction writes:
+//                                     mstatus, mscratch, mcause, mintstatus, step 2.2d, D-035;
+//                                     never present in CLINT mode)
 //                                   trap:       "trap" cause epc tval (hex)
 //                                   An older retirement and a younger trap in the same cycle
 //                                   are written in that order (the trap is in EX, the
@@ -68,7 +71,9 @@ module tb_compliance;
   logic [11:0] r_csr_addr;
   logic [31:0] r_csr_wdata;
   logic        t_valid;
-  logic [4:0]  t_cause;
+  logic [5:0]  t_cause;
+  logic [3:0]  r_csrx_we;
+  logic [127:0] r_csrx_wdata;
   logic [31:0] t_pc, t_tval;
 
   px_core #(.BOOT_ADDR(MEM_BASE), .MTVEC_RESET(TRAPVEC)) dut (
@@ -78,12 +83,16 @@ module tb_compliance;
     .data_req_o(d_req), .data_gnt_i(d_gnt), .data_addr_o(d_addr), .data_we_o(d_we),
     .data_be_o(d_be), .data_wdata_o(d_wdata), .data_rvalid_i(d_rvalid),
     .data_rdata_i(d_rdata), .data_err_i(d_err),
-    .irq_req_i(1'b0), .irq_id_i(6'd0), .irq_ack_o(), .irq_ack_id_o(),   // no interrupt source (D-033)
+    // no interrupt source (D-033, D-035): the CLIC inputs are idle, CLINT mode stays
+    .irq_req_i(1'b0), .irq_valid_i(1'b0), .irq_id_i(6'd0), .irq_level_i(8'd0), .irq_shv_i(1'b0),
+    .irq_ack_o(), .irq_ack_id_o(), .irq_claim_o(), .irq_claim_id_o(),
+    .mil_o(), .mintthresh_o(), .clic_mode_o(),
     .rvfi_valid_o(r_valid), .rvfi_pc_o(r_pc), .rvfi_insn_o(r_insn),
     .rvfi_rd_addr_o(r_rd), .rvfi_rd_wdata_o(r_rd_wdata), .rvfi_mem_addr_o(r_mem_addr),
     .rvfi_mem_rmask_o(r_rmask), .rvfi_mem_wmask_o(r_wmask),
     .rvfi_mem_rdata_o(r_mem_rdata), .rvfi_mem_wdata_o(r_mem_wdata),
     .rvfi_csr_we_o(r_csr_we), .rvfi_csr_addr_o(r_csr_addr), .rvfi_csr_wdata_o(r_csr_wdata),
+    .rvfi_csrx_we_o(r_csrx_we), .rvfi_csrx_wdata_o(r_csrx_wdata),
     .trap_valid_o(t_valid), .trap_irq_o(), .trap_cause_o(t_cause), .trap_pc_o(t_pc), .trap_tval_o(t_tval)
   );
 
@@ -178,10 +187,17 @@ module tb_compliance;
       if (r_valid && !done) begin
         retired++;
         last_retire = cycle;
-        if (trace_fd != 0)
-          $fwrite(trace_fd, "%08h %08h %0d %08h %0d %03h %08h %08h %01h %01h %08h\n", r_pc, r_insn,
+        if (trace_fd != 0) begin
+          $fwrite(trace_fd, "%08h %08h %0d %08h %0d %03h %08h %08h %01h %01h %08h", r_pc, r_insn,
                   r_rd, r_rd_wdata, r_csr_we, r_csr_addr, r_csr_wdata, r_mem_addr, r_rmask,
                   r_wmask, r_mem_wdata);
+          // writes of other CSRs (D-035 item 13): one "addr value" pair per slot
+          if (r_csrx_we[0]) $fwrite(trace_fd, " 300 %08h", r_csrx_wdata[31:0]);
+          if (r_csrx_we[1]) $fwrite(trace_fd, " 340 %08h", r_csrx_wdata[63:32]);
+          if (r_csrx_we[2]) $fwrite(trace_fd, " 342 %08h", r_csrx_wdata[95:64]);
+          if (r_csrx_we[3]) $fwrite(trace_fd, " fb1 %08h", r_csrx_wdata[127:96]);
+          $fwrite(trace_fd, "\n");
+        end
         if (console != 32'd0 && r_wmask != 4'd0 && r_mem_addr == console) begin
           // (Icarus 12 crashes on a string cast of a byte: use $sformatf)
           if (r_mem_wdata[7:0] == 8'h0A) begin

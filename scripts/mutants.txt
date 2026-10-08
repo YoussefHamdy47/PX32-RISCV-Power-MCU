@@ -1037,6 +1037,17 @@
 + assign trap_pc_o    = wb_bus_err ? wb_pc_q : ex_pc_q;
 # mepc of an interrupt is always the EX pc, even when EX is empty
 
+# ------------------------------------------------------------------ px_core CLIC wiring (step 2.2d, D-035)
+[W02] rtl/core/px_core.sv tb_core
+- assign irq_ack_id_o = irq_id_i;
++ assign irq_ack_id_o = 6'd0;
+# the take acknowledges the wrong id (D-034 obligation O3)
+
+[W03] rtl/core/px_core.sv tb_core
+- wb_csrx_we_q  <= ex_dec_q.csr_en ? csr_side_we : 4'd0;
++ wb_csrx_we_q  <= 4'd0;
+# side writes of a CSR instruction are not reported at retirement (D-035 item 12)
+
 # ------------------------------------------------------------------ px_clic (step 2.2c, D-034)
 [L01] rtl/irq/px_clic.sv tb_px_clic
 - assign r       = {t_v[2*n+1], t_l[2*n+1]} >= {t_v[2*n], t_l[2*n]};

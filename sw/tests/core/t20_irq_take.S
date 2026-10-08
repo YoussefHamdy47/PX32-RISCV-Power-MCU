@@ -1,9 +1,17 @@
-/* t20_irq_take: interrupt take point (Phase 2 step 2.2b, DECISIONS.md D-033;
+/* t20_irq_take: interrupt take point (Phase 2 step 2.2b, DECISIONS.md D-033; in CLIC mode
+ * since step 2.2d, D-035;
  * PHASE2_VERIFICATION.md Ã‚Â§ 3.2). px-build: irq
  *
  * Built with PX_IRQ_RESUME: crt0 resumes after an interrupt at mepc (or at an armed
  * TF_IRQ_RESUME). Every run is checked afterwards by scripts/px_iss.py --replay (the
  * boundary of each take depends on memory timing), and tb_core checks the take point.
+ *
+ * Since step 2.2d the interrupts come from px_clic (tb_core attaches it to the core): the
+ * program enters CLIC mode (mtvec = trap_entry | 3, NBASE 0x1000_0040) and configures its
+ * ten ids as positive edge-triggered, enabled, non-vectored CLIC inputs; IRQTRIG pulses the
+ * input so its pending flop is set at the edge the 2.2b model set its own (cycle 0), and
+ * crt0 clears the pending bit in the handler. Takes, latencies and coverage are those of
+ * step 2.2b.
  *
  * Each sweep arms the testbench trigger (IRQTRIG) with a delay d = 0, 1, 2, ... and then
  * runs the same block, so in ideal mode the take lands on every instruction and pipeline
@@ -50,6 +58,20 @@ buf: .word 0, 0, 0, 0
   .globl test_main
 test_main:
   li   s1, 0                      /* interrupts expected so far */
+  /* CLIC mode and the ten inputs (level 255, edge, non-vectored, enabled) */
+  la   t0, trap_entry
+  ori  t0, t0, 3
+  csrw mtvec, t0
+  li   t1, CLIC_WORD(15, CLIC_ATTR_EDGE, 1)
+  li   t2, 3                      /* ids 3, 5, ..., 21 */
+1:
+  slli t3, t2, 2
+  li   t4, CLIC_INTIP
+  add  t4, t4, t3
+  sw   t1, 0(t4)
+  addi t2, t2, 2
+  li   t3, 23
+  blt  t2, t3, 1b
   csrsi mstatus, 8                /* MIE = 1 */
 
   /* ---- S1: control flow, d = 0..23 ---- */
@@ -194,7 +216,7 @@ s6_loop:
   WAIT_IRQS(17)
   li   t4, TRAP_FRAME
   lw   t4, TF_IRQ_ID(t4)
-  CHECK(18, t4, 0x8000000F)       /* mcause: interrupt bit, code = id 15 */
+  CHECK(18, t4, 0xB800000F)       /* CLIC mcause: interrupt, mpp 11, mpie 1, mpil 0, id 15 */
 
   /* ---- S8: request around an ECALL, d = 0..11 ---- */
   li   s0, 0
