@@ -19,6 +19,7 @@ mkdir -p "$OUT" sim/prog
 : > "$OUT/list.txt"
 : > "$OUT/list_random.txt"
 : > "$OUT/list_random_long.txt"
+: > "$OUT/list_irq.txt"
 for src in sw/tests/core/*.S sw/tests/random/*.S sw/tests/random_long/*.S; do
   [ -f "$src" ] || continue
   name="$(basename "$src" .S)"
@@ -43,6 +44,7 @@ for src in sw/tests/core/*.S sw/tests/random/*.S sw/tests/random_long/*.S; do
   case "$src" in
     sw/tests/random/*) echo "$name" >> "$OUT/list_random.txt" ;;
     sw/tests/random_long/*) echo "$name" >> "$OUT/list_random_long.txt" ;;
+    sw/tests/core/*_clic_*) echo "$name" >> "$OUT/list_irq.txt" ;;   # tb_core_irq (D-035)
     *)                 echo "$name" >> "$OUT/list.txt" ;;
   esac
   echo "built $name"

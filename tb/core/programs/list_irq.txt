@@ -1,0 +1,3 @@
+t16_clic_basic
+t17_clic_nest
+t18_clic_vector

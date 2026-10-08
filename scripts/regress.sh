@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # D-019: run all unit/core/SoC source lists and print a summary.
 # Exit status: 0 = all pass, 1 = any failure or invalid suite.
+# REGRESS_JOBS (default 4) benches run at a time (step 2.2d, DECISIONS.md D-035): every bench
+# writes only its own files (sim/<tb>.vvp, sim/logs/<tb>*), so they are independent; the
+# summary lists them in the usual order.
 
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -31,7 +34,31 @@ for f in "${tests[@]}"; do
     exit 1
   fi
   seen[$tb]=1
-  if scripts/run_unit.sh "$tb" "$f" > /dev/null 2>&1; then
+done
+
+# run: the longest benches (core, SoC) first, at most REGRESS_JOBS at a time; each writes
+# its exit status to sim/logs/<tb>.rc
+JOBS="${REGRESS_JOBS:-4}"
+mkdir -p sim/logs
+order=()
+for f in "${tests[@]}"; do case "$f" in tb/unit/*) ;; *) order+=("$f") ;; esac; done
+for f in "${tests[@]}"; do case "$f" in tb/unit/*) order+=("$f") ;; esac; done
+running=0
+for f in "${order[@]}"; do
+  tb="$(basename "$f" .f)"
+  rm -f "sim/logs/${tb}.rc"
+  ( scripts/run_unit.sh "$tb" "$f" > /dev/null 2>&1; echo $? > "sim/logs/${tb}.rc" ) &
+  running=$((running + 1))
+  if [ "$running" -ge "$JOBS" ]; then
+    wait -n
+    running=$((running - 1))
+  fi
+done
+wait
+
+for f in "${tests[@]}"; do
+  tb="$(basename "$f" .f)"
+  if [ "$(cat "sim/logs/${tb}.rc" 2>/dev/null)" = 0 ]; then
     detail="$(grep -m1 '^PASS' "sim/logs/${tb}.log" | sed 's/^PASS [^ ]* //')"
     printf '  %-28s PASS  %s\n' "$tb" "$detail"
     pass=$((pass + 1))

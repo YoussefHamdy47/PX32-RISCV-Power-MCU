@@ -1,0 +1,17 @@
+# timeout_seconds: 600
+# post_check: "$PY" scripts/px_iss.py --replay sim/logs/replay_tb_core_irq.manifest
+rtl/pkg/px_pkg.sv
+rtl/core/px_alu.sv
+rtl/core/px_regfile.sv
+rtl/core/px_decoder.sv
+rtl/core/px_decompressor.sv
+rtl/core/px_if_stage.sv
+rtl/core/px_csr_m.sv
+rtl/core/px_csr_clic.sv
+rtl/core/px_csr.sv
+rtl/core/px_mul.sv
+rtl/core/px_div.sv
+rtl/core/px_core.sv
+rtl/irq/px_clic.sv
+tb/core/tb_core.sv
+tb/core/tb_core_irq.sv

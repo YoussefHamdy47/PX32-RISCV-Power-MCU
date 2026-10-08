@@ -107,7 +107,8 @@
 module tb_core #(
   parameter LIST       = "tb/core/programs/list.txt",
   parameter RANDOM_SET = 0,
-  parameter NAME       = "tb_core"
+  parameter NAME       = "tb_core",
+  parameter TAKE_COV   = 1        // require the take-point bins (t20); 0 in tb_core_irq
 );
 
   localparam logic [31:0] ITCM_BASE = 32'h1000_0000;
@@ -300,6 +301,15 @@ module tb_core #(
   int          cov_vec [COV_VEC];
   bit          vec_ideal_seen;
   bit          mr_wait;            // an MRET refetch is in progress
+  // O5 (D-034, cycle-exact; D-035 item 24): the cycle right after (0) a committed mintthresh
+  // write with a winner above mil at or below the new threshold and no request, (1) a
+  // committed mintthresh write with a take, (2) a committed mtvec write that left CLIC mode
+  // with a winner that would be eligible in CLIC mode and no take, (3) an mnxti claim with a
+  // take. Bins 0-2 are required once a mintthresh write was committed in ideal mode in CLIC
+  // mode, bin 3 once a claim was seen in ideal mode.
+  int          cov_o5 [4];
+  bit          o5_th_seen, o5_claim_seen;
+  bit          p_th_wr, p_leave, p_claim;   // the previous cycle's events
   int          mr_t0;
   logic [31:0] mr_tbl, mr_target;
   bit          irq_ideal_seen;
@@ -740,6 +750,18 @@ module tb_core #(
         if (lat > run_lat_max) run_lat_max = lat;
         if (mode == MODE_IDEAL && irq_lat_exp != 0 && lat == irq_lat_exp) run_lat_exact++;
       end
+      // O5 bins: this cycle against the previous cycle's events
+      if (p_th_wr && irq_valid && cmode && irq_level > mil && irq_level <= mthresh && dut.csr_mie && !irq_req)
+        cov_o5[0]++;
+      if (p_th_wr && irq_ack)                                                 cov_o5[1]++;
+      if (p_leave && irq_valid && !cmode && irq_level > mil && irq_level > mthresh && dut.csr_mie && !irq_ack)
+        cov_o5[2]++;
+      if (p_claim && irq_ack)                                                 cov_o5[3]++;
+      p_th_wr = dut.csr_commit && dut.ex_dec_q.csr_write && dut.ex_csr_addr == 12'h347 && cmode;
+      p_leave = dut.csr_commit && dut.u_csr.u_clic.leave_clic;
+      p_claim = claim;
+      if (mode == MODE_IDEAL && p_th_wr) o5_th_seen    = 1'b1;
+      if (mode == MODE_IDEAL && claim)   o5_claim_seen = 1'b1;
       // MRET with minhv (D-035 item 19): the table entry at mepc & ~3 is refetched; the
       // handler (or the faulting entry) is in EX 5 cycles after the MRET (ideal mode)
       if (mr_wait && dut.ex_valid_q) begin
@@ -893,6 +915,7 @@ module tb_core #(
     end
     ref_checked = 0;
     n_irqs = 0; irq_wait_ex = 1'b0; n_claims = 0; mr_wait = 1'b0;
+    p_th_wr = 1'b0; p_leave = 1'b0; p_claim = 1'b0;
     run_lat_n = 0; run_lat_min = 1 << 30; run_lat_max = 0; run_lat_exact = 0;
     begin
       int tfd;
@@ -1051,6 +1074,8 @@ module tb_core #(
     for (int k = 1; k <= 17; k++) cov_div[k] = 0;
     for (int k = 0; k < 4; k++) cov_defer[k] = 0;
     for (int k = 0; k < COV_VEC; k++) cov_vec[k] = 0;
+    for (int k = 0; k < 4; k++) cov_o5[k] = 0;
+    o5_th_seen = 1'b0; o5_claim_seen = 1'b0;
     vec_ideal_seen = 1'b0;
     man_fd = $fopen($sformatf("sim/logs/replay_%s.manifest", NAME), "w");
     if (man_fd == 0) begin
@@ -1086,12 +1111,18 @@ module tb_core #(
     if (irq_ideal_seen) begin
       int holes;
       holes = 0;
-      for (int k = 0; k < COV_EX; k++)
-        if (cov_ex[k] == 0) begin holes++; $display("hole: take with EX/ID kind %0d", k); end
-      for (int k = 1; k <= 17; k++)
-        if (cov_div[k] == 0) begin holes++; $display("hole: take at divider cycle %0d", k); end
-      for (int k = 0; k < 4; k++)
-        if (cov_defer[k] == 0) begin holes++; $display("hole: take deferred by cause %0d", k); end
+      if (TAKE_COV) begin
+        for (int k = 0; k < COV_EX; k++)
+          if (cov_ex[k] == 0) begin holes++; $display("hole: take with EX/ID kind %0d", k); end
+        for (int k = 1; k <= 17; k++)
+          if (cov_div[k] == 0) begin holes++; $display("hole: take at divider cycle %0d", k); end
+        for (int k = 0; k < 4; k++)
+          if (cov_defer[k] == 0) begin holes++; $display("hole: take deferred by cause %0d", k); end
+      end
+      if (o5_th_seen)
+        for (int k = 0; k < 3; k++)
+          if (cov_o5[k] == 0) begin holes++; $display("hole: O5 bin %0d", k); end
+      if (o5_claim_seen && cov_o5[3] == 0) begin holes++; $display("hole: O5 bin 3"); end
       if (vec_ideal_seen)
         for (int k = 0; k < COV_VEC; k++)
           if (cov_vec[k] == 0) begin holes++; $display("hole: vectored entry bin %0d", k); end

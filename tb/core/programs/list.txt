@@ -13,5 +13,4 @@ t12_counters
 t13_muldiv
 t14_timing_isa
 t15_bitmanip
-t18_clic_vector
 t20_irq_take
