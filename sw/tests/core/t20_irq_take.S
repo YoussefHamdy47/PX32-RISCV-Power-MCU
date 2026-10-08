@@ -1,6 +1,6 @@
 /* t20_irq_take: interrupt take point (Phase 2 step 2.2b, DECISIONS.md D-033; in CLIC mode
  * since step 2.2d, D-035;
- * PHASE2_VERIFICATION.md Ã‚Â§ 3.2). px-build: irq
+ * PHASE2_VERIFICATION.md § 3.2). px-build: irq
  *
  * Built with PX_IRQ_RESUME: crt0 resumes after an interrupt at mepc (or at an armed
  * TF_IRQ_RESUME). Every run is checked afterwards by scripts/px_iss.py --replay (the
@@ -18,7 +18,7 @@
  * state of the block in turn; the block's results are checked after the interrupt (the
  * interrupted instruction runs again after the handler). Trigger word: [15:0] delay,
  * [21:16] id (also the mcause code), [27:24] expected latency in ideal mode (4, the
- * non-vectored budget of PHASE2_ARCHITECTURE.md Ã‚Â§ 4.9; 0 = not checked, used where MIE is
+ * non-vectored budget of PHASE2_ARCHITECTURE.md § 4.9; 0 = not checked, used where MIE is
  * 0 when the request arrives or an exception comes first), bit 31 random extra delay.
  *   S1 control flow: ALU, JAL in ID, taken branch, JALR, FENCE.I, JAL with link
  *   S2 loads and stores (the request of a memory instruction in EX is withheld)
@@ -33,7 +33,7 @@
  *   S10 request around a load access fault: the older access's bus error first
  * The bench also requires every deferral cause to occur (WB bus error: S10; exception in
  * EX: S8; older access and ungranted request: the stall modes) and checks that no take
- * wins over an exception (contract Ã‚Â§ 2.3).
+ * wins over an exception (contract § 2.3).
  */
 #define FAULT_ADDR 0x30000000             /* unmapped in tb_core: access fault */
 #include "px_test.h"

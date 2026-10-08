@@ -32,6 +32,8 @@ for src in sw/tests/core/*.S sw/tests/random/*.S sw/tests/random_long/*.S; do
   "$BIN/riscv-none-elf-objdump" -d -M no-aliases,numeric "sim/prog/$name.elf" > "sim/prog/$name.dis"
   "$PY" scripts/elf2hex.py "sim/prog/$name.elf" "$OUT/$name"
   if [ -n "$irq" ]; then
+    # handler and vector-table alignment (D-029, D-035 item 23)
+    "$PY" scripts/check_align.py "sim/prog/$name.elf"
     rm -f "$OUT/$name.trace.ref" "$OUT/$name.traps.ref"
     printf 'checked by scripts/px_iss.py --replay (interrupt program, D-033)\n' > "$OUT/$name.replay"
   else

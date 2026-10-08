@@ -21,6 +21,10 @@ SECTIONS
     *(.rodata .rodata.*)
   } > ITCM
 
+  /* CLIC vector tables (step 2.2d): fetched on the instruction port; a section of its own
+     so scripts/check_align.py can find the entries */
+  .vectab : { *(.vectab) } > ITCM
+
   .data : {
     *(.data .data.* .sdata .sdata.*)
     *(.bss .bss.* .sbss .sbss.* COMMON)

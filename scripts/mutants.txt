@@ -1048,6 +1048,49 @@
 + wb_csrx_we_q  <= 4'd0;
 # side writes of a CSR instruction are not reported at retirement (D-035 item 12)
 
+# ------------------------------------------------------------------ vector table fetch (step 2.2d, D-035 items 16-19)
+[G01] rtl/core/px_if_stage.sv tb_core equivalent
+- assign resp_keep = instr_rvalid_i && (discard_q == 2'd0) && !(tbl_resp && !instr_err_i);
++ assign resp_keep = instr_rvalid_i && (discard_q == 2'd0);
+# equivalent: the table word is also written into the fetch buffer, but valid_o is masked
+# in FETCH and JUMP and the JUMP self-redirect empties the buffer, so it never reaches ID.
+# tb/formal/px_if_stage.sby (bmc) passes on it (V1, P5, P6); the term is kept as a guard
+
+[G02] rtl/core/px_if_stage.sv tb_core
+- assign tbl_word = {instr_rdata_i[31:1], 1'b0};
++ assign tbl_word = instr_rdata_i;
+# bit 0 of the table word is not cleared (K-72)
+
+[G03] rtl/core/px_if_stage.sv tb_core
+- (out_ok && (redirect_i || jump || (space_ok && !vblock))));
++ (out_ok && (redirect_i || jump || space_ok)));
+# sequential requests continue after the table request (and during a table fault)
+
+[G04] rtl/core/px_core.sv tb_core
+- assign irq_go     = irq_elig && !wb_bus_err && !hold_older && !dreq_pend_q && !if_vec_busy;
++ assign irq_go     = irq_elig && !wb_bus_err && !hold_older && !dreq_pend_q;
+# an interrupt is taken during an MRET table refetch
+
+[G05] rtl/core/px_core.sv tb_core
+- .trap_minhv_i (ex_trap && ex_vecf_q),
++ .trap_minhv_i (1'b0),
+# a table fetch fault does not set mcause.minhv (K-73)
+
+[G06] rtl/core/px_core.sv tb_core
+- assign mret_vec = mret_commit && csr_minhv;
++ assign mret_vec = 1'b0;
+# MRET with minhv returns to mepc as code instead of refetching the table entry (K-74)
+
+[G07] rtl/core/px_core.sv tb_core
+- if_redirect_pc = vec_take ? csr_tbl_addr : csr_mtvec;
++ if_redirect_pc = csr_mtvec;
+# a vectored take fetches the table word at NBASE
+
+[G08] rtl/core/px_if_stage.sv tb_core
+- assign vec_fault_o     = (vstate_q == V_FAULT);
++ assign vec_fault_o     = 1'b0;
+# the faulting table entry is not marked (mcause.minhv stays 0)
+
 # ------------------------------------------------------------------ px_clic (step 2.2c, D-034)
 [L01] rtl/irq/px_clic.sv tb_px_clic
 - assign r       = {t_v[2*n+1], t_l[2*n+1]} >= {t_v[2*n], t_l[2*n]};

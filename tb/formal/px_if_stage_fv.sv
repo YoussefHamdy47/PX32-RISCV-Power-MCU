@@ -22,6 +22,18 @@
 //   P7  internal bookkeeping: outstanding count equals the slave's, discards never
 //       exceed it, the buffer never overflows
 //   P8  no word is available while an old-stream request is still held
+// Vector table fetch (step 2.2d, DECISIONS.md D-035 items 16-19): a redirect may carry vec_i
+// (word-aligned target: the table entry). The expected PC after it is the table word with
+// bit 0 cleared, known when the entry is the tracked word A (A is arbitrary, so this covers
+// every entry address); after an entry at another address the PC check pauses until the
+// next redirect, as after a fault.
+//   V1  nothing is delivered while the table word is awaited or in the self-redirect cycle;
+//       vec_busy_o outside IDLE, vec_fault_o only on a delivered fetch fault
+//   V2  the first request of a vector redirect's stream is the table entry; after it is
+//       granted no request until its response; no request while a table fault is pending
+//   V3  a table entry at A without error leads to the handler at {DA[31:1], 0} (P5/P6 then
+//       check its bits and the following PCs); with error, the entry is delivered once as
+//       a fetch fault at pc = A with vec_fault_o, and nothing after it until a redirect
 // After a delivered fetch fault the stage is not checked until the next redirect: the
 // core always redirects after one (the faulting instruction traps, or an older
 // instruction flushes it), and the stage is not required to continue past it.
@@ -31,6 +43,7 @@
 module px_if_stage_fv (
   input logic        clk_i,
   input logic        redirect_i,
+  input logic        vec_i,
   input logic [31:0] redirect_pc_i,
   input logic        ready_i,
   input logic        instr_gnt_i,
@@ -105,11 +118,13 @@ module px_if_stage_fv (
 
   // ------------------------------------------------------------------ DUT
   logic        valid_o, is_c, ill_c, ferr, ferr_hi;
+  logic        vec_busy, vec_fault;
   logic [31:0] pc_o, instr_o, raw_o;
 
   px_if_stage dut (
     .clk_i, .rst_ni,
     .redirect_i, .redirect_pc_i,
+    .vec_i, .vec_busy_o(vec_busy), .vec_fault_o(vec_fault),
     .valid_o, .ready_i, .pc_o, .instr_o, .raw_o,
     .is_compressed_o(is_c), .illegal_c_o(ill_c),
     .fetch_err_o(ferr), .fetch_err_hi_o(ferr_hi),
@@ -118,6 +133,8 @@ module px_if_stage_fv (
   );
 
   always_comb assume (redirect_pc_i[0] == 1'b0);
+  // a vector redirect names a table entry (word address); vec_i only with a redirect
+  always_comb if (vec_i) assume (redirect_i && redirect_pc_i[1:0] == 2'b00);
 
   // ------------------------------------------------------------------ properties
   logic        past_valid = 1'b0;
@@ -152,6 +169,10 @@ module px_if_stage_fv (
     if (!rst_ni) begin
       exp_pc   <= 32'h1000_0000;
       poisoned <= 1'b0;
+    end else if (redirect_i && vec_i) begin
+      // V3: entry at A: handler address, or the faulting entry itself; elsewhere unchecked
+      exp_pc   <= EA ? A & 32'hFFFF_FFFC : {DA[31:1], 1'b0};
+      poisoned <= redirect_pc_i[31:2] != a_word;
     end else if (redirect_i) begin
       exp_pc   <= redirect_pc_i;
       poisoned <= 1'b0;
@@ -164,6 +185,36 @@ module px_if_stage_fv (
   always_comb if (rst_ni && valid_o && !poisoned) assert (pc_o == exp_pc);
   // nothing is delivered in a redirect cycle
   always_comb if (redirect_i) assert (!valid_o);
+
+  // ------------------------------------------------------------------ V1-V3
+  logic        vtab_open;          // a vector redirect's table request not yet granted
+  logic [31:0] vtab_q;             // its table entry address
+  logic        vtab_err;           // the current vector redirect's entry is A with EA
+  always_ff @(posedge clk_i) begin
+    if (!rst_ni) begin
+      vtab_open <= 1'b0; vtab_err <= 1'b0;
+    end else if (redirect_i) begin
+      vtab_open <= vec_i && !(granted && !dut.stale_grant);
+      vtab_q    <= redirect_pc_i;
+      vtab_err  <= vec_i && redirect_pc_i[31:2] == a_word && EA;
+    end else if (granted && !dut.stale_grant) begin
+      vtab_open <= 1'b0;
+    end
+  end
+
+  // V1
+  always_comb if (rst_ni && (dut.vstate_q == 2'd1 || dut.vstate_q == 2'd2)) assert (!valid_o);
+  always_comb if (rst_ni) assert (vec_busy == (dut.vstate_q != 2'd0));
+  always_comb if (rst_ni && vec_fault && valid_o) assert (ferr);
+  always_comb if (rst_ni && valid_o && !poisoned && vtab_err) assert (vec_fault && pc_o == (A & 32'hFFFF_FFFC));
+  always_comb if (rst_ni && valid_o && !vec_fault) assert (!vtab_err || poisoned);
+  // V2
+  always_comb if (rst_ni && redirect_i && vec_i && req && !dut.pend_q) assert (addr == redirect_pc_i);
+  always_comb if (rst_ni && !redirect_i && vtab_open && req && !(dut.pend_q && dut.pend_stale_q))
+    assert (addr == vtab_q);
+  always_comb if (rst_ni && !redirect_i && dut.vstate_q == 2'd1 && dut.vreq_q) assert (!req);
+  always_comb if (rst_ni && !redirect_i && dut.vstate_q == 2'd3) assert (!req);
+  always_comb if (rst_ni && dut.vstate_q == 2'd1 && !dut.vreq_q) assert (vtab_open);
 
   // P5: contents
   logic [31:0] pc_word_a;
@@ -219,5 +270,13 @@ module px_if_stage_fv (
   logic disc_seen;
   always_ff @(posedge clk_i) if (!rst_ni) disc_seen <= 1'b0; else if (dut.discard_q != 2'd0) disc_seen <= 1'b1;
   always_comb cover (rst_ni && valid_o && !poisoned && at_a_hi && !EB && DA[17:16] == 2'b11 && disc_seen);
+  // ... a vectored handler reached through the table word at A, at a halfword offset
+  logic vec_seen;
+  always_ff @(posedge clk_i)
+    if (!rst_ni) vec_seen <= 1'b0;
+    else if (redirect_i) vec_seen <= vec_i && redirect_pc_i[31:2] == a_word;
+  always_comb cover (rst_ni && valid_o && !poisoned && vec_seen && !EA && DA[1] && !vec_fault);
+  // ... and a table fault delivered
+  always_comb cover (rst_ni && valid_o && vec_fault && vec_seen);
 
 endmodule

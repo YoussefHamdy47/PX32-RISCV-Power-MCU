@@ -82,6 +82,14 @@
 //   - coverage of the take point (EX contents and divider cycle at the take) and of each
 //     deferral cause (WB bus error, EX exception, older access, ungranted request),
 //     reported; every bin must be hit once an interrupt was taken in ideal mode
+//   - vectored entry (D-035 items 16-19): the handler of a vectored take is the table word
+//     (bit 0 cleared), or the table entry itself when its fetch faults; no take during a
+//     table fetch; an MRET with minhv puts the refetched handler in EX 5 cycles after the
+//     MRET in ideal mode (unless the entry faults or an interrupt is taken first); bins: the
+//     fetch-stage state at a vectored take (nothing outstanding, a response arriving, a
+//     granted request without response, an ungranted request, buffer full), a take deferred
+//     by a refetch, a table fault, an MRET refetch; every bin must be hit once a vectored
+//     take was seen in ideal mode
 //   Programs with <name>.replay (built with "px-build: irq") have no static reference:
 //   the bench writes every retirement, exception and interrupt of each run in program order
 //   to sim/logs/replay_<NAME>_<run>.ev and lists the runs in sim/logs/replay_<NAME>.manifest;
@@ -284,6 +292,16 @@ module tb_core #(
   int          cov_ex [COV_EX];
   int          cov_div [1:17];
   int          cov_defer [4];   // eligible but deferred: WB bus error, EX exception, older access, ungranted request
+  // vectored entry (D-035 item 17): fetch-stage state at a vectored take (0 nothing
+  // outstanding, 1 a response arriving, 2 a granted request without response, 3 a raised
+  // request not granted, 4 buffer full), 5 a take deferred by a table fetch (MRET refetch),
+  // 6 a table fetch fault, 7 an MRET refetch; checked once a vectored take was seen in ideal mode
+  localparam int COV_VEC = 8;
+  int          cov_vec [COV_VEC];
+  bit          vec_ideal_seen;
+  bit          mr_wait;            // an MRET refetch is in progress
+  int          mr_t0;
+  logic [31:0] mr_tbl, mr_target;
   bit          irq_ideal_seen;
 
   // OBI stability tracking
@@ -627,12 +645,21 @@ module tb_core #(
         if (irq_ack) run_error("claim and take in the same cycle");
         if (!tohost_retired) n_claims++;
       end
+      // vector table fetch (D-035 item 17): once the table request is granted no other
+      // instruction request until its response; none while a table fault is pending
+      if (i_req && !dut.if_redirect &&
+          ((dut.u_if.vstate_q == 2'd1 && dut.u_if.vreq_q) || dut.u_if.vstate_q == 2'd3))
+        run_error("instruction request while the vector table word is awaited or faulted");
       if (irq_ack) begin
         if (!irq_req || !dut.csr_mie)
           run_error("interrupt taken without an eligible request");
         if (irq_ack_id !== irq_id) run_error("acknowledged id differs from the request");
         if (!t_valid || t_cause !== irq_id || t_tval !== 32'd0)
           run_error($sformatf("take reported as valid %b cause %0d tval %08h", t_valid, t_cause, t_tval));
+        if (dut.if_vec_busy)
+          run_error("interrupt taken during a vector table fetch");
+        mr_wait = 1'b0;                  // an interrupt right after an MRET refetch: the
+                                         // handler of the take is checked instead
         if (dut.csr_commit || dut.mret_commit || d_req || dut.u_mul.en_i ||
             dut.div_accept)
           run_error("CSR commit, MRET, data request, multiply or divide completion in a take cycle");
@@ -662,11 +689,25 @@ module tb_core #(
           n_irqs++;
           if (replay && ev_fd != 0) $fwrite(ev_fd, "I %0d %08h %0d\n", irq_id, t_pc, cycle);
         end
-        // latency is measured for the trigger's own id; the handler is at NBASE
+        // vectored take: fetch-stage state (coverage)
+        if (irq_shv) begin
+          if (mode == MODE_IDEAL) vec_ideal_seen = 1'b1;
+          if (dut.u_if.count_q == 2'd3)                cov_vec[4]++;
+          if (i_req && !i_gnt)                         cov_vec[3]++;
+          else if (i_rvalid)                           cov_vec[1]++;
+          else if (dut.u_if.outst_q != 2'd0)           cov_vec[2]++;
+          else                                         cov_vec[0]++;
+          if (!in_itcm(dut.csr_tbl_addr))              cov_vec[6]++;
+        end
+        // latency is measured for the trigger's own id; the handler is at NBASE, or (vectored)
+        // at the table word with bit 0 cleared; a faulting table fetch delivers the entry
+        // itself (pc = the table address) to EX
         if (irq_meas && irq_ack_id == irq_trig_id) begin
           irq_wait_ex = 1'b1;
           irq_meas    = 1'b0;
-          irq_target  = dut.csr_mtvec;
+          if (!irq_shv)                       irq_target = dut.csr_mtvec;
+          else if (in_itcm(dut.csr_tbl_addr)) irq_target = itcm[(dut.csr_tbl_addr - ITCM_BASE) >> 2] & 32'hFFFF_FFFE;
+          else                                irq_target = dut.csr_tbl_addr;
         end
       end else if (irq_req && dut.csr_mie) begin
         // eligible but deferred: count each cause (coverage), any other reason is an error
@@ -674,7 +715,9 @@ module tb_core #(
         if (dut.ex_valid_q && dut.ex_exc)      cov_defer[1]++;
         if (dut.hold_older)                    cov_defer[2]++;
         if (dut.dreq_pend_q)                   cov_defer[3]++;
-        if (!(dut.wb_bus_err || dut.hold_older || dut.dreq_pend_q || (dut.ex_valid_q && dut.ex_exc)))
+        if (dut.if_vec_busy)                   cov_vec[5]++;
+        if (!(dut.wb_bus_err || dut.hold_older || dut.dreq_pend_q || (dut.ex_valid_q && dut.ex_exc) ||
+              dut.if_vec_busy))
           run_error("eligible interrupt not taken, and no excluded condition holds");
       end
       if (irq_wait_ex && !irq_ack && dut.ex_valid_q) begin
@@ -696,6 +739,27 @@ module tb_core #(
         if (lat < run_lat_min) run_lat_min = lat;
         if (lat > run_lat_max) run_lat_max = lat;
         if (mode == MODE_IDEAL && irq_lat_exp != 0 && lat == irq_lat_exp) run_lat_exact++;
+      end
+      // MRET with minhv (D-035 item 19): the table entry at mepc & ~3 is refetched; the
+      // handler (or the faulting entry) is in EX 5 cycles after the MRET (ideal mode)
+      if (mr_wait && dut.ex_valid_q) begin
+        int lat;
+        mr_wait = 1'b0;
+        lat = cycle - mr_t0;
+        if (dut.ex_pc_q !== mr_target)
+          run_error($sformatf("first instruction in EX after an MRET refetch at %08h, handler at %08h",
+                              dut.ex_pc_q, mr_target));
+        // (a faulting refetch delivers the entry itself one cycle earlier: not checked)
+        if (mode == MODE_IDEAL && in_itcm(mr_tbl) && lat != 5)
+          run_error($sformatf("MRET refetch latency %0d cycles, expected 5", lat));
+      end
+      if (dut.mret_vec) begin
+        cov_vec[7]++;
+        mr_wait = 1'b1;
+        mr_t0   = cycle;
+        mr_tbl  = dut.csr_mepc & 32'hFFFF_FFFC;
+        mr_target = in_itcm(mr_tbl) ? itcm[(mr_tbl - ITCM_BASE) >> 2] & 32'hFFFF_FFFE : mr_tbl;
+        if (!in_itcm(mr_tbl)) cov_vec[6]++;
       end
       // EX-leave stamps for the replay log (after the retirement above has used exq[0])
       if ((r_valid || dut.wb_bus_err) && exq.size() != 0) begin
@@ -828,7 +892,7 @@ module tb_core #(
       if (ref_fd == 0) run_error({"missing reference trace for ", name});
     end
     ref_checked = 0;
-    n_irqs = 0; irq_wait_ex = 1'b0; n_claims = 0;
+    n_irqs = 0; irq_wait_ex = 1'b0; n_claims = 0; mr_wait = 1'b0;
     run_lat_n = 0; run_lat_min = 1 << 30; run_lat_max = 0; run_lat_exact = 0;
     begin
       int tfd;
@@ -986,6 +1050,8 @@ module tb_core #(
     for (int k = 0; k < COV_EX; k++) cov_ex[k] = 0;
     for (int k = 1; k <= 17; k++) cov_div[k] = 0;
     for (int k = 0; k < 4; k++) cov_defer[k] = 0;
+    for (int k = 0; k < COV_VEC; k++) cov_vec[k] = 0;
+    vec_ideal_seen = 1'b0;
     man_fd = $fopen($sformatf("sim/logs/replay_%s.manifest", NAME), "w");
     if (man_fd == 0) begin
       $display("FAIL %s (cannot write the replay manifest)", NAME);
@@ -1026,6 +1092,9 @@ module tb_core #(
         if (cov_div[k] == 0) begin holes++; $display("hole: take at divider cycle %0d", k); end
       for (int k = 0; k < 4; k++)
         if (cov_defer[k] == 0) begin holes++; $display("hole: take deferred by cause %0d", k); end
+      if (vec_ideal_seen)
+        for (int k = 0; k < COV_VEC; k++)
+          if (cov_vec[k] == 0) begin holes++; $display("hole: vectored entry bin %0d", k); end
       if (holes != 0) begin
         $display("ERROR %0d interrupt coverage holes", holes);
         total_errors += holes;

@@ -79,8 +79,17 @@
 //   - Retirement interface: rvfi_csrx_* report CSR writes besides the addressed one (mnxti,
 //     mscratchcswl, CLIC-format mcause, mtvec leaving CLIC mode): slot 0 mstatus, 1 mscratch,
 //     2 mcause, 3 mintstatus (D-035 item 12).
+//   - Hardware vectoring (smclicshv; D-035 items 16-19, D-029 registered table word): a
+//     take with irq_shv_i sends the fetch stage a vector redirect: it fetches the table
+//     entry at TBASE + 4 * id, clears bit 0, registers it and redirects itself to it (budget
+//     6 cycles, 4 for non-vectored). A table fetch error arrives as a fetch-faulting entry at
+//     pc = the table address: an instruction access fault with mcause.minhv = 1 (px_csr).
+//     MRET in CLIC mode with mcause.minhv = 1 refetches the entry at mepc & ~3 the same way.
+//     While the fetch stage is in a table fetch (vec_busy) no interrupt is taken: the next
+//     instruction's pc is not known yet.
 // Staged features (tracked in PROGRESS.md)
-//   - Hardware vectoring (smclicshv table fetch in IF): step 2.2d part D.
+//   - Level-255 fast context and the fatal fault of a table fault at level 255: step 2.3
+//     (hook: trap_minhv_i with mil = 255, PHASE2_ARCHITECTURE.md § 6.6).
 //   WFI executes as a NOP (allowed by the privileged spec); FENCE is a NOP (in-order
 //   core, no caches); FENCE.I refetches everything after it.
 
@@ -203,6 +212,8 @@ module px_core #(
   logic        id_hold, id_redirect;
   logic        if_redirect;
   logic [31:0] if_redirect_pc;
+  logic        if_vec, if_vec_busy, if_vec_fault;   // vector table fetch (D-035)
+  logic        vec_take, mret_vec;
   logic        id_csr_illegal;
   logic [31:0] csr_mtvec, csr_mepc;
   logic        ex_is_mul, ex_is_div, div_done, div_wait;
@@ -218,6 +229,9 @@ module px_core #(
     .clk_i, .rst_ni,
     .redirect_i     (if_redirect),
     .redirect_pc_i  (if_redirect_pc),
+    .vec_i          (if_vec),
+    .vec_busy_o     (if_vec_busy),
+    .vec_fault_o    (if_vec_fault),
     .valid_o        (if_valid),
     .ready_i        (!id_hold),
     .pc_o           (if_pc),
@@ -237,6 +251,7 @@ module px_core #(
   logic        id_valid_q;
   logic [31:0] id_pc_q, id_instr_q, id_raw_q;
   logic        id_is_c_q, id_ill_c_q, id_ferr_q, id_ferr_hi_q;
+  logic        id_vecf_q;                    // fetch fault of a vector table entry (minhv)
 
   decode_t     dec;
   px_decoder u_dec (.instr_i(id_instr_q), .dec_o(dec));
@@ -269,6 +284,7 @@ module px_core #(
   logic        ex_valid_q;
   logic [31:0] ex_pc_q, ex_raw_q;
   logic        ex_is_c_q, ex_ferr_q, ex_ferr_hi_q, ex_ill_q;
+  logic        ex_vecf_q;
   // The full decode is carried into EX. csr_read is not needed (no implemented CSR has
   // read side effects) and some fields are unused in EX; synthesis removes their flops.
   /* verilator lint_off UNUSEDSIGNAL */
@@ -455,10 +471,8 @@ module px_core #(
   logic [31:0] csr_rdata, csr_wdata, csr_operand, ex_result;
   logic [3:0]  csr_side_we;
   logic [127:0] csr_side_wdata;
-  /* verilator lint_off UNUSEDSIGNAL */
-  logic        csr_minhv;                  // MRET table refetch: step 2.2d part D
-  logic [31:0] csr_tbl_addr;               // vector table entry: step 2.2d part D
-  /* verilator lint_on UNUSEDSIGNAL */
+  logic        csr_minhv;                  // MRET refetches the table entry at mepc & ~3
+  logic [31:0] csr_tbl_addr;               // TBASE + 4 * irq_id_i
   logic [11:0] id_csr_addr, ex_csr_addr;
   logic [1:0]  ex_csr_op;
   assign id_csr_addr = dec.csr_addr;
@@ -490,7 +504,7 @@ module px_core #(
     .trap_i       (trap_valid_o),
     .trap_irq_i   (trap_irq_o),
     .trap_cause_i (trap_cause_o),
-    .trap_minhv_i (1'b0),
+    .trap_minhv_i (ex_trap && ex_vecf_q),   // table fetch fault (K-73); 2.3: fatal at mil 255
     .trap_pc_i    (trap_pc_o),
     .trap_tval_i  (trap_tval_o),
     .mret_i       (mret_commit),
@@ -648,7 +662,7 @@ module px_core #(
   // commit block and the divider kill use irq_go and keep the exception decode (address
   // adder -> misaligned) off the take's path into the fetch address (D-033, § 10 risk row).
   // The trap report, mcause and the acknowledge use the exact irq_take.
-  assign irq_go     = irq_elig && !wb_bus_err && !hold_older && !dreq_pend_q;
+  assign irq_go     = irq_elig && !wb_bus_err && !hold_older && !dreq_pend_q && !if_vec_busy;
   assign irq_take   = irq_go && !(ex_valid_q && ex_exc);
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
@@ -664,12 +678,19 @@ module px_core #(
                        dec.is_jal && !id_ferr_q && !id_illegal;
 
   assign if_redirect = wb_bus_err || ex_redirect || id_redirect || irq_go;
+  // vector redirects (D-035): a vectored take (exact: an EX exception wins and goes to NBASE),
+  // and a committed MRET with minhv (refetch of the table entry at mepc & ~3)
+  assign vec_take = irq_take && irq_shv_i;
+  assign mret_vec = mret_commit && csr_minhv;
+  logic [31:0] mepc_entry;                    // table entry of an MRET refetch: mepc & ~3
+  assign mepc_entry = {csr_mepc[31:2], 2'b00};
+  assign if_vec   = vec_take || mret_vec;
   always_comb begin
-    if (wb_bus_err || ex_trap || irq_go)   if_redirect_pc = csr_mtvec;
+    if (wb_bus_err || ex_trap || irq_go)   if_redirect_pc = vec_take ? csr_tbl_addr : csr_mtvec;
     else if (ex_redirect) begin
       if (br_taken)                  if_redirect_pc = br_target;
       else if (ex_is_jalr)           if_redirect_pc = jalr_target;
-      else if (ex_is_mret)           if_redirect_pc = csr_mepc;
+      else if (ex_is_mret)           if_redirect_pc = csr_minhv ? mepc_entry : csr_mepc;
       else                           if_redirect_pc = fencei_target;
     end else                         if_redirect_pc = jal_target;
   end
@@ -702,6 +723,7 @@ module px_core #(
       id_valid_q <= 1'b0;
       id_pc_q    <= 32'd0; id_instr_q <= 32'd0; id_raw_q <= 32'd0;
       id_is_c_q  <= 1'b0;  id_ill_c_q <= 1'b0;  id_ferr_q <= 1'b0;  id_ferr_hi_q <= 1'b0;
+      id_vecf_q  <= 1'b0;
     end else if (wb_bus_err || ex_redirect || id_redirect || irq_go) begin
       id_valid_q <= 1'b0;
     end else if (!id_hold) begin
@@ -713,6 +735,7 @@ module px_core #(
       id_ill_c_q <= if_ill_c;
       id_ferr_q  <= if_ferr;
       id_ferr_hi_q <= if_ferr_hi;
+      id_vecf_q  <= if_vec_fault;
     end
   end
 
@@ -722,6 +745,7 @@ module px_core #(
       ex_valid_q <= 1'b0;
       ex_pc_q    <= 32'd0; ex_raw_q <= 32'd0;
       ex_is_c_q  <= 1'b0;  ex_ferr_q <= 1'b0; ex_ferr_hi_q <= 1'b0; ex_ill_q <= 1'b0;
+      ex_vecf_q  <= 1'b0;
       ex_dec_q   <= '0;
       ex_rs1_q   <= 32'd0; ex_rs2_q <= 32'd0;
       fwd_a_q    <= 1'b0;  fwd_b_q  <= 1'b0;
@@ -737,6 +761,7 @@ module px_core #(
       ex_is_c_q  <= id_is_c_q;
       ex_ferr_q  <= id_ferr_q;
       ex_ferr_hi_q <= id_ferr_hi_q;
+      ex_vecf_q  <= id_vecf_q;
       ex_ill_q   <= id_illegal;
       ex_dec_q   <= dec;
       ex_rs1_q   <= rf_a;
@@ -833,15 +858,16 @@ module px_core #(
 
   logic [4:0]  wb_f_rs1_addr_q, wb_f_rs2_addr_q;
   logic [31:0] wb_f_rs1_rdata_q, wb_f_rs2_rdata_q, wb_f_pc_wdata_q;
-  logic        wb_f_csr_q, wb_f_csr_read_q, wb_f_csr_write_q;
+  logic        wb_f_csr_q, wb_f_csr_read_q, wb_f_csr_write_q, wb_f_mretvec_q;
   logic [31:0] wb_f_csr_rdata_q;
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
       wb_f_rs1_addr_q  <= 5'd0;  wb_f_rs2_addr_q  <= 5'd0;
       wb_f_rs1_rdata_q <= 32'd0; wb_f_rs2_rdata_q <= 32'd0; wb_f_pc_wdata_q <= 32'd0;
       wb_f_csr_q <= 1'b0; wb_f_csr_read_q <= 1'b0; wb_f_csr_write_q <= 1'b0;
-      wb_f_csr_rdata_q <= 32'd0;
+      wb_f_csr_rdata_q <= 32'd0; wb_f_mretvec_q <= 1'b0;
     end else if (!wb_wait) begin
+      wb_f_mretvec_q   <= ex_is_mret && csr_minhv;
       wb_f_rs1_addr_q  <= ex_f_rs1_addr;  wb_f_rs2_addr_q  <= ex_f_rs2_addr;
       wb_f_rs1_rdata_q <= ex_f_rs1_rdata; wb_f_rs2_rdata_q <= ex_f_rs2_rdata;
       wb_f_pc_wdata_q  <= ex_f_pc_wdata;
@@ -885,8 +911,9 @@ module px_core #(
     end else if (f_report) begin
       f_order_q <= f_order_q + 64'd1;
       // the next entry is the handler's first instruction (trap, or an interrupt taken in
-      // this cycle after the WB retirement; D-033)
-      f_intr_q  <= f_trap || irq_take;
+      // this cycle after the WB retirement; D-033; an MRET with minhv, whose next pc comes
+      // from the vector table, D-035)
+      f_intr_q  <= f_trap || irq_take || (wb_retire && wb_f_mretvec_q);
     end else if (irq_take) begin
       f_intr_q  <= 1'b1;
     end
