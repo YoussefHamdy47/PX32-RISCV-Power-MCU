@@ -250,9 +250,9 @@
 # store data not moved to the addressed byte lanes
 
 [P19] rtl/core/px_core.sv tb_core
-- if (wb_bus_err || ex_trap || irq_go)   if_redirect_pc = csr_mtvec;
-+ if (ex_trap || irq_go)                 if_redirect_pc = csr_mtvec;
-# (retargeted to the step 2.2b lines, D-033: same bug)
+- if (wb_bus_err || ex_trap || irq_go)   if_redirect_pc = vec_take ? csr_tbl_addr : csr_mtvec;
++ if (ex_trap || irq_go)                 if_redirect_pc = vec_take ? csr_tbl_addr : csr_mtvec;
+# (retargeted to the step 2.2b lines, D-033, and the step 2.2d lines, D-035: same bug)
 # a WB bus error redirects to the wrong address
 
 [P20] rtl/core/px_core.sv tb_core
@@ -268,8 +268,9 @@
 # two requests outstanding (the audit's contract finding)
 
 [F02] rtl/core/px_if_stage.sv tb_core
-- assign req           = run_q && (pend_q || (out_ok && (redirect_i || space_ok)));
-+ assign req           = (pend_q || (out_ok && (redirect_i || space_ok)));
+- assign req           = run_q && (pend_q || (out_ok && (redirect_i || jump || (space_ok && !vblock))));
++ assign req           = (pend_q || (out_ok && (redirect_i || jump || (space_ok && !vblock))));
+# (retargeted to the step 2.2d lines, D-035: same bug)
 # request raised while reset is asserted (audit finding)
 
 [F03] rtl/core/px_if_stage.sv tb_core
@@ -278,8 +279,9 @@
 # responses to requests issued before a redirect are not dropped
 
 [F04] rtl/core/px_if_stage.sv tb_core
-- assign instr_addr_o  = pend_q ? pend_addr_q : redirect_i ? redirect_word : seq_addr;
-+ assign instr_addr_o  = redirect_i ? redirect_word : pend_q ? pend_addr_q : seq_addr;
+- assign instr_addr_o  = pend_q ? pend_addr_q : redirect_i ? redirect_word :
++ assign instr_addr_o  = redirect_i ? redirect_word : pend_q ? pend_addr_q :
+# (retargeted to the step 2.2d lines, D-035: same bug)
 # a held request changes its address on a redirect (OBI violation)
 
 [F05] rtl/core/px_if_stage.sv tb_core
@@ -298,8 +300,9 @@
 # fault on the second word of a straddling instruction ignored
 
 [F08] rtl/core/px_if_stage.sv tb_core
-- assign resp_keep = instr_rvalid_i && (discard_q == 2'd0);
-+ assign resp_keep = instr_rvalid_i;
+- assign resp_keep = instr_rvalid_i && (discard_q == 2'd0) && !(tbl_resp && !instr_err_i);
++ assign resp_keep = instr_rvalid_i && !(tbl_resp && !instr_err_i);
+# (retargeted to the step 2.2d lines, D-035: same bug)
 # a response that must be dropped is used by the aligner
 
 [F09] rtl/core/px_if_stage.sv tb_core
@@ -313,8 +316,9 @@
 # first-word fetch faults also report pc + 2
 
 [F11] rtl/core/px_if_stage.sv tb_core,tb_core_random equivalent
-- assign valid_o         = aligned_valid && !redirect_i && !pend_stale_q;
-+ assign valid_o         = aligned_valid && !redirect_i;
+- assign valid_o         = aligned_valid && !redirect_i && !pend_stale_q &&
++ assign valid_o         = aligned_valid && !redirect_i &&
+# (retargeted to the step 2.2d lines, D-035: same bug)
 # equivalent: while an old-stream request is still held, every response is dropped and
 # the buffer was cleared by the redirect, so no word is available anyway
 
@@ -335,8 +339,9 @@
 # forwarding select set although the EX instruction does not move to WB
 
 [O03] rtl/core/px_if_stage.sv tb_core
-- seq_inc_d  = granted && !pend_q;
-+ seq_inc_d  = granted;
+- seq_inc_d  = granted && !pend_q;        // the target itself was requested now
++ seq_inc_d  = granted;                   // the target itself was requested now
+# (retargeted to the step 2.2d lines, D-035: same bug)
 # after a redirect, a granted old-stream request makes the target word be skipped
 
 [O04] rtl/core/px_core.sv tb_core
@@ -626,8 +631,9 @@
 # illegal CSR accesses (unimplemented, read-only write) do not trap
 
 [K06] rtl/core/px_core.sv tb_core
-- else if (ex_is_mret)           if_redirect_pc = csr_mepc;
+- else if (ex_is_mret)           if_redirect_pc = csr_minhv ? mepc_entry : csr_mepc;
 + else if (ex_is_mret)           if_redirect_pc = fencei_target;
+# (retargeted to the step 2.2d lines, D-035: same bug)
 # MRET falls through instead of returning to mepc
 
 [K07] rtl/core/px_core.sv tb_core
@@ -967,14 +973,16 @@
 
 # ------------------------------------------------------------------ interrupt take point (step 2.2b, D-033)
 [Q01] rtl/core/px_core.sv tb_core
-- assign irq_go     = irq_elig && !wb_bus_err && !hold_older && !dreq_pend_q;
-+ assign irq_go     = irq_elig && !wb_bus_err && !dreq_pend_q;
+- assign irq_go     = irq_elig && !wb_bus_err && !hold_older && !dreq_pend_q && !if_vec_busy;
++ assign irq_go     = irq_elig && !wb_bus_err && !dreq_pend_q && !if_vec_busy;
 # take while an older access in WB still waits for its response
+# (retargeted to the step 2.2d lines, D-035: same bug)
 
 [Q02] rtl/core/px_core.sv tb_core
-- assign irq_go     = irq_elig && !wb_bus_err && !hold_older && !dreq_pend_q;
-+ assign irq_go     = irq_elig && !wb_bus_err && !hold_older;
+- assign irq_go     = irq_elig && !wb_bus_err && !hold_older && !dreq_pend_q && !if_vec_busy;
++ assign irq_go     = irq_elig && !wb_bus_err && !hold_older && !if_vec_busy;
 # take while a data request raised in the previous cycle is still ungranted (OBI: dropped)
+# (retargeted to the step 2.2d lines, D-035: same bug)
 
 [Q03] rtl/core/px_core.sv tb_core
 - assign data_req_o   = ex_mem_go && !wb_wait && !wb_bus_err && !dreq_gate;
@@ -1069,7 +1077,7 @@
 [G02] rtl/core/px_if_stage.sv tb_core_irq
 - assign tbl_word = {instr_rdata_i[31:1], 1'b0};
 + assign tbl_word = instr_rdata_i;
-# bit 0 of the table word is not cleared (K-72)
+# bit 0 of the table word is not cleared (K-70)
 
 [G03] rtl/core/px_if_stage.sv tb_core_irq
 - (out_ok && (redirect_i || jump || (space_ok && !vblock))));

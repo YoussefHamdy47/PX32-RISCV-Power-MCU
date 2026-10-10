@@ -14,7 +14,7 @@
  *      pending bit is cleared by the take (K-71), so it does not retrigger
  *   V2 a 32-bit first instruction at a halfword offset (exempt_halfword_v9): latency 7, the
  *      one exempt entry (D-029 item 4)
- *   V3 a table word with bit 0 set (id 10): bit 0 is ignored (K-72)
+ *   V3 a table word with bit 0 set (id 10): bit 0 is ignored (K-70)
  *   V4 a non-vectored interrupt in the same program goes to NBASE: latency 4
  *   V5 table fetch fault (K-73): with mtvt pointing outside memory the vectored take faults:
  *      instruction access fault at pc = tval = the table address, mcause.minhv = 1, mpil =
@@ -27,6 +27,8 @@
  *      mepc = the handler's first instruction
  *   V7 agent: random vectored edge interrupts (ids 12-15) over a loop of divides,
  *      multiplies, loads, stores and branches, for the fetch-stage coverage bins
+ *   V8 mnxti returns 0 when the winner is vectored (K-75), and claims nothing
+ *   V9 a table entry rewritten by a store and FENCE.I is used by the next take (K-77)
  */
 #include "px_test.h"
 
@@ -44,6 +46,7 @@
 #define F_FIX1     80     /* table fault handler: next mepc (one use), then F_FIX2 */
 #define F_FIX2     84
 #define F_LOGP     88     /* exception log pointer: cause, epc, tval per exception */
+#define F_GEN      92     /* id seen by isr_vgen last (V9) */
 #define F_VCNT     96     /* + 4 * id: vectored takes per id (ids 0-15) */
 
 #define ARM(val) li t5, val; li t6, IRQTRIG; sw t5, 0(t6)
@@ -230,6 +233,53 @@ v7_loop:
   li   gp, 29
   beqz a0, fail_handler           /* the agent's interrupts were taken */
 
+  /* ---- V8: mnxti with a vectored winner ---- */
+  csrci mstatus, 8
+  VCNT(s9, 13)
+  addi s9, s9, 1
+  ARM(TRIG(13, 0))
+  li   t0, CLIC_ENTRY(13)
+1:
+  lbu  t1, 0(t0)                  /* wait until id 13 (vectored) is pending */
+  beqz t1, 1b
+  .rept 4
+  addi x0, x0, 0
+  .endr
+  csrr a0, CSR_MNXTI
+  CHECK(30, a0, 0)                /* the winner is vectored: 0 */
+  csrrsi a0, CSR_MNXTI, 8         /* claims nothing, but sets MIE: taken vectored now */
+  CHECK(31, a0, 0)
+  li   gp, 32
+  li   t3, 300
+2:
+  VCNT(t4, 13)
+  beq  t4, s9, 3f                 /* taken once through the table */
+  addi t3, t3, -1
+  bnez t3, 2b
+  j    fail_handler
+3:
+
+  /* ---- V9: rewrite a table entry, FENCE.I, take ---- */
+  la   t0, vectab + 4 * 10
+  la   t1, isr_vgen
+  sw   t1, 0(t0)                  /* id 10 now goes to the generic handler */
+  fence.i
+  li   t0, TRAP_FRAME
+  sw   zero, F_GEN(t0)
+  ARM(TRIG(10, 0))
+  li   gp, 33
+  li   t3, 300
+4:
+  FIELD(t4, F_GEN)
+  li   t6, 10
+  beq  t4, t6, 5f
+  addi t3, t3, -1
+  bnez t3, 4b
+  j    fail_handler
+5:
+  VCNT(a0, 10)
+  CHECK(34, a0, 2)                /* V3 once, V9 once */
+
   PASS
 
 /* ------------------------------------------------------------------ vector table */
@@ -240,7 +290,7 @@ vectab:
   .word isr_bad, isr_bad, isr_bad, isr_bad, isr_bad, isr_bad, isr_bad, isr_bad
   .word isr_v8
   .word exempt_halfword_v9
-  .word isr_v10 + 1               /* bit 0 set: ignored (K-72) */
+  .word isr_v10 + 1               /* bit 0 set: ignored (K-70) */
   .word isr_bad
   .word isr_vgen, isr_vgen, isr_vgen, isr_vgen
 
@@ -278,6 +328,7 @@ isr_vgen:
   sw   t0, TF_T0(sp)
   csrr t0, mcause
   andi t0, t0, 0x3F
+  sw   t0, F_GEN(sp)
   j    v_common
 
   .balign 4

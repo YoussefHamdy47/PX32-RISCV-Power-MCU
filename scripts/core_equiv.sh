@@ -15,7 +15,11 @@
 # values and the shared outputs equal for programs that stay in CLINT mode (assumption A),
 # so the two results together cover the core. The CLIC inputs are tied idle in both; the
 # reference's interrupt request port is tied idle as well. trap_cause_o is 6 bits in the gate:
-# its bits 4:0 are paired with the reference's and bit 5 is proven 0 (SAT).
+# its bits 4:0 are paired with the reference's and bit 5 is proven 0 (SAT). The fetch stage's
+# vector state (step 2.2d part D) has no counterpart in the reference: with the ties above no
+# vector redirect exists, so u_if.vstate_q stays IDLE; that is proven by SAT temporal induction
+# on the gate, and only then is the flop replaced by its constant (equivalence induction
+# cannot see a reset-reachability invariant of an unmatched flop).
 #
 # Gold: the px_core source files of scripts/synth_targets.txt at the reference commit,
 # extracted with git show into sim/core_equiv/gold/. Gate: the working-tree files; ports
@@ -133,8 +137,13 @@ ${cut_gate:+design -save gate_pre
 async2sync
 opt -full
 sat -seq 1 -prove trap_cause_x[5] 0 -verify
+sat -tempinduct -set-init-zero -prove u_if.vstate_q 2'b00 -verify
 design -load gate_pre
 delete -port w:trap_cause_x
+cd px_core
+delete w:u_if.vstate_q %ci1 t:\$aldff t:\$adff %u t:\$dff %u %i
+connect -set \u_if.vstate_q 2'b00
+cd ..
 opt_clean}
 rename px_core gate
 design -stash gate

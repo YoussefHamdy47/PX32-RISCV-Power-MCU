@@ -102,6 +102,10 @@ module rvfi_wrapper (
   wire c_lo_mcycle   = c_valid && c_addr == 12'hB00, c_hi_mcycle   = c_valid && c_addr == 12'hB80;
   wire c_lo_minstret = c_valid && c_addr == 12'hB02, c_hi_minstret = c_valid && c_addr == 12'hB82;
 
+`ifdef PX32_NO_CSWL_SWAP
+  // csrc_any only (checks.cfg): no retirement swaps mscratch through mscratchcswl
+  always @* if (!reset) assume (!x_we[1]);
+`endif
 `ifdef RISCV_FORMAL_CSR_MSCRATCH
   // mscratch directly, or swapped by mscratchcswl (side-write slot 1: the old value is the
   // instruction's rd value, the new one rs1)
